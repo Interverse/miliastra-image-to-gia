@@ -1,8 +1,15 @@
 import type protobuf from 'protobufjs'
 import { rotatedBBoxSize, rotatePoint } from './utils'
-import type { GeneratorConfig, RectPlan } from './types'
+import type { DeviceScales, GeneratorConfig, RectPlan } from './types'
 
 const SHAPE_SQUARE = 100001
+const DEVICE_SCALE_KEYS: (keyof DeviceScales)[] = ['desktop', 'mobile', 'controller', 'mobileController']
+
+function scaleForTransformEntry(scales: DeviceScales, index: number): number {
+  const key = DEVICE_SCALE_KEYS[index] ?? 'desktop'
+  const scale = scales[key]
+  return Number.isFinite(scale) && scale > 0 ? scale : 1
+}
 
 export interface GiaTypes {
   root: protobuf.Root
@@ -169,7 +176,7 @@ function ensureTransformEntryDefaults(entry: any, index: number) {
   if (!f.rotation) f.rotation = {}
 }
 
-function setChildTransform(child: any, x: number, y: number, width: number, height: number, rotationDegrees = 0) {
+function setChildTransform(child: any, x: number, y: number, width: number, height: number, rotationDegrees = 0, deviceScales: DeviceScales) {
   const prop = findTransformProperty(child.ui.object)
   const arr = prop.body.transform.transform_array
   if (!arr.entries || arr.entries.length === 0) {
@@ -181,10 +188,11 @@ function setChildTransform(child: any, x: number, y: number, width: number, heig
   arr.entries.forEach((entry: any, idx: number) => {
     ensureTransformEntryDefaults(entry, idx)
     const f = entry.fields
-    f.position.x = x
-    f.position.y = y
-    f.size.x = width
-    f.size.y = height
+    const deviceScale = scaleForTransformEntry(deviceScales, idx)
+    f.position.x = x * deviceScale
+    f.position.y = y * deviceScale
+    f.size.x = width * deviceScale
+    f.size.y = height * deviceScale
     const rot = ((rotationDegrees % 360) + 360) % 360
     if (Math.abs(rot) < 1e-6) {
       delete f.rotation.z_degrees
@@ -194,34 +202,36 @@ function setChildTransform(child: any, x: number, y: number, width: number, heig
   })
 }
 
-function setSquareValues(child: any, label: string, x: number, y: number, width: number, height: number, colorArgb: number, rotationDegrees = 0) {
+function setSquareValues(child: any, label: string, x: number, y: number, width: number, height: number, colorArgb: number, rotationDegrees = 0, deviceScales: DeviceScales) {
   const shapeProp = findShapeProperty(child.ui.object)
   if (!shapeProp.body) shapeProp.body = {}
   if (!shapeProp.body.shape_style) shapeProp.body.shape_style = {}
   shapeProp.body.shape_style.shape_type = SHAPE_SQUARE
   shapeProp.body.shape_style.color_argb = colorArgb >>> 0
-  setChildTransform(child, x, y, width, height, rotationDegrees)
+  setChildTransform(child, x, y, width, height, rotationDegrees, deviceScales)
   setUniqueUiIdentityAndName(child, getHiddenUiId(child) ?? 0, label)
 }
 
-function setParentTransform(parent: any, x: number, y: number, width: number, height: number) {
+function setParentTransform(parent: any, x: number, y: number, width: number, height: number, deviceScales: DeviceScales) {
   try {
     const prop = findTransformProperty(parent.ui.object)
     const arr = prop.body.transform.transform_array
-    for (const entry of arr.entries ?? []) {
-      ensureTransformEntryDefaults(entry, 0)
-      entry.fields.position.x = x
-      entry.fields.position.y = y
-      entry.fields.size.x = width
-      entry.fields.size.y = height
+    for (const [idx, entry] of (arr.entries ?? []).entries()) {
+      ensureTransformEntryDefaults(entry, idx)
+      const deviceScale = scaleForTransformEntry(deviceScales, idx)
+      entry.fields.position.x = x * deviceScale
+      entry.fields.position.y = y * deviceScale
+      entry.fields.size.x = width * deviceScale
+      entry.fields.size.y = height * deviceScale
     }
   } catch {
     // ignore
   }
   for (const p of parent.ui?.object?.properties ?? []) {
     if (p.body?.size_component?.size) {
-      p.body.size_component.size.x = width
-      p.body.size_component.size.y = height
+      const desktopScale = scaleForTransformEntry(deviceScales, 0)
+      p.body.size_component.size.x = width * desktopScale
+      p.body.size_component.size.y = height * desktopScale
     }
   }
 }
@@ -348,7 +358,7 @@ export async function buildGiaFromRects(
       uiId = maxUiId
     }
     setUniqueUiIdentityAndName(dep, uiId, label)
-    setSquareValues(dep, label, centerX, centerY, width, height, rect.color, config.imageRotation)
+    setSquareValues(dep, label, centerX, centerY, width, height, rect.color, config.imageRotation, config.deviceScales)
   }
 
   bundle.internal_name = bundle.internal_name ?? config.parentName
@@ -357,7 +367,7 @@ export async function buildGiaFromRects(
 
   if (!config.keepParentPosition) {
     const bbox = rotatedBBoxSize(imgWidth * config.pixelSize, imgHeight * config.pixelSize, config.imageRotation)
-    setParentTransform(parent, config.parentX, config.parentY, bbox.width * config.fieldScale, bbox.height * config.fieldScale)
+    setParentTransform(parent, config.parentX, config.parentY, bbox.width * config.fieldScale, bbox.height * config.fieldScale, config.deviceScales)
   }
 
   bundle.export_tag = `600489258-0-${parentGuid}-\\${outputName}`

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
+  DeviceScaleKey,
   GeneratorConfig,
   GenerationStats,
   Optimization,
@@ -14,6 +15,12 @@ const DEFAULT_CONFIG: GeneratorConfig = {
   parentX: 0,
   parentY: 0,
   fieldScale: 0.5,
+  deviceScales: {
+    desktop: 1,
+    mobile: 1,
+    controller: 1,
+    mobileController: 1,
+  },
   keepParentPosition: false,
   yDown: false,
   exportLayerOrder: "front-to-back",
@@ -30,6 +37,13 @@ const DEFAULT_CONFIG: GeneratorConfig = {
   stage2Passes: 2000,
   stage2Ratio: 10,
 };
+
+const DEVICE_SCALE_FIELDS: Array<{ key: DeviceScaleKey; label: string }> = [
+  { key: "desktop", label: "Desktop" },
+  { key: "mobile", label: "Mobile" },
+  { key: "controller", label: "Controller" },
+  { key: "mobileController", label: "Mobile Controller" },
+];
 
 function numberValue(value: string, fallback: number) {
   const n = Number(value);
@@ -121,6 +135,25 @@ export default function App() {
     ).toFixed(2)}s`;
   }, [stats]);
 
+  const maxPreviewScale = useMemo(() => {
+    return Math.max(
+      0.01,
+      ...DEVICE_SCALE_FIELDS.map(({ key }) => config.deviceScales[key])
+    );
+  }, [config.deviceScales]);
+
+  const previewPixelScale = useMemo(() => {
+    return Math.max(0.05, config.pixelSize / 10);
+  }, [config.pixelSize]);
+
+  const previewRotationFit = useMemo(() => {
+    const radians = (Math.abs(config.imageRotation) % 180) * (Math.PI / 180);
+    const rotatedBoundsMultiplier =
+      Math.abs(Math.cos(radians)) + Math.abs(Math.sin(radians));
+
+    return 1 / Math.max(1, rotatedBoundsMultiplier);
+  }, [config.imageRotation]);
+
   async function handleGenerate() {
     if (!file || !workerRef.current) return;
     setBusy(true);
@@ -150,6 +183,16 @@ export default function App() {
     value: GeneratorConfig[K]
   ) {
     setConfig((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function updateDeviceScale(key: DeviceScaleKey, value: number) {
+    setConfig((prev) => ({
+      ...prev,
+      deviceScales: {
+        ...prev.deviceScales,
+        [key]: value,
+      },
+    }));
   }
 
   function handleImageChange(nextFile: File | null) {
@@ -243,6 +286,26 @@ export default function App() {
                 }
               />
             </label>
+          </div>
+
+          <div
+            className="scale-config-row"
+            aria-label="Device scale configurations"
+          >
+            {DEVICE_SCALE_FIELDS.map(({ key, label }) => (
+              <label className="field scale-field" key={key}>
+                <span>{label} Scale</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.05"
+                  value={config.deviceScales[key]}
+                  onChange={(e) =>
+                    updateDeviceScale(key, numberValue(e.target.value, 1))
+                  }
+                />
+              </label>
+            ))}
           </div>
 
           <details
@@ -510,9 +573,45 @@ export default function App() {
         </section>
 
         <section className="right-pane">
-          <div className="preview-frame">
+          <div className="preview-frame preview-stack">
             {previewUrl ? (
-              <img src={previewUrl} alt="PNG preview" />
+              DEVICE_SCALE_FIELDS.map(({ key, label }) => {
+                const scale = config.deviceScales[key];
+                // Keep the biggest preview under 100% so rotation has room and
+                // the image does not clip into the preview-card border.
+                const relativeWidth = `${Math.max(
+                  8,
+                  Math.min(
+                    72,
+                    (scale / maxPreviewScale) *
+                      48 *
+                      previewPixelScale *
+                      previewRotationFit
+                  )
+                )}%`;
+                return (
+                  <div className="scaled-preview" key={key}>
+                    <div className="preview-label">
+                      <span>{label}</span>
+                      <strong>
+                        {(scale * previewPixelScale).toFixed(2)}× preview
+                      </strong>
+                    </div>
+                    <div className="preview-image-row">
+                      <div className="preview-transform-box">
+                        <img
+                          src={previewUrl}
+                          alt={`${label} scaled PNG preview`}
+                          style={{
+                            width: relativeWidth,
+                            transform: `rotate(${-config.imageRotation}deg)`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
             ) : (
               <div className="empty-preview">PNG preview</div>
             )}
