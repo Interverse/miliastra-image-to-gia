@@ -4,9 +4,36 @@ export interface ProgressSink {
   (message: string): void;
 }
 
-interface Candidate {
-  name: string;
+interface Grid {
+  width: number;
+  height: number;
+  rows: Uint32Array[];
+}
+
+interface RectPlanResult {
   rects: RectPlan[];
+  width: number;
+  height: number;
+}
+
+interface UnderpaintCandidate {
+  color: number;
+  bbox: BBox;
+  savings: number;
+  count: number;
+  area: number;
+  corrections: RectPlan[];
+}
+
+interface BBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+function nowMs() {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
 function colorAt(
@@ -30,310 +57,930 @@ function colorAt(
   );
 }
 
-function buildGrid(imageData: ImageData) {
+function buildGrid(imageData: ImageData): Grid {
   const { width, height, data } = imageData;
-  const grid = Array.from({ length: height }, () => new Uint32Array(width));
+  const rows = Array.from({ length: height }, () => new Uint32Array(width));
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      grid[y][x] = colorAt(data, width, x, y);
+      rows[y][x] = colorAt(data, width, x, y);
     }
   }
-  return grid;
+  return { width, height, rows };
 }
 
-function exactGreedyRectangles(
-  grid: Uint32Array[],
-  progress?: ProgressSink
-): RectPlan[] {
-  const h = grid.length;
-  const w = grid[0]?.length ?? 0;
-  const used = Array.from({ length: h }, () => new Uint8Array(w));
-  const rects: RectPlan[] = [];
+function makeGrid(width: number, height: number): Grid {
+  return {
+    width,
+    height,
+    rows: Array.from({ length: height }, () => new Uint32Array(width)),
+  };
+}
 
-  for (let y = 0; y < h; y += 1) {
-    if (progress && y % 32 === 0) progress(`Exact scan row ${y + 1}/${h}`);
-    for (let x = 0; x < w; x += 1) {
-      const color = grid[y][x];
-      if (color === 0 || used[y][x]) continue;
-
-      let maxW = 0;
-      while (x + maxW < w && grid[y][x + maxW] === color && !used[y][x + maxW])
-        maxW += 1;
-
-      let bestW = 1;
-      let bestH = 1;
-      let bestArea = 1;
-      let widthHere = maxW;
-      let yy = y;
-
-      while (yy < h && widthHere > 0) {
-        let rowW = 0;
-        while (
-          rowW < widthHere &&
-          x + rowW < w &&
-          grid[yy][x + rowW] === color &&
-          !used[yy][x + rowW]
-        )
-          rowW += 1;
-        widthHere = Math.min(widthHere, rowW);
-        if (widthHere === 0) break;
-        const heightHere = yy - y + 1;
-        const area = widthHere * heightHere;
-        if (area > bestArea) {
-          bestArea = area;
-          bestW = widthHere;
-          bestH = heightHere;
-        }
-        yy += 1;
-      }
-
-      for (let ry = y; ry < y + bestH; ry += 1) {
-        for (let rx = x; rx < x + bestW; rx += 1) {
-          used[ry][rx] = 1;
-        }
-      }
-      rects.push({ x, y, w: bestW, h: bestH, color });
+function subGridWithRemovedColor(
+  grid: Grid,
+  bbox: BBox,
+  removeColor?: number
+): Grid {
+  const width = bbox.x1 - bbox.x0;
+  const height = bbox.y1 - bbox.y0;
+  const out = makeGrid(width, height);
+  for (let y = bbox.y0; y < bbox.y1; y += 1) {
+    const outRow = out.rows[y - bbox.y0];
+    const srcRow = grid.rows[y];
+    for (let x = bbox.x0; x < bbox.x1; x += 1) {
+      const color = srcRow[x];
+      outRow[x - bbox.x0] = color !== 0 && color !== removeColor ? color : 0;
     }
   }
-
-  return rects;
+  return out;
 }
 
-function bbox(a: RectPlan, b: RectPlan) {
-  const x0 = Math.min(a.x, b.x);
-  const y0 = Math.min(a.y, b.y);
-  const x1 = Math.max(a.x + a.w, b.x + b.w);
-  const y1 = Math.max(a.y + a.h, b.y + b.h);
-  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+function offsetRects(rects: RectPlan[], dx: number, dy: number): RectPlan[] {
+  return rects.map((r) => ({ ...r, x: r.x + dx, y: r.y + dy }));
 }
 
-function overlaps(a: RectPlan, b: RectPlan) {
+function rectArea(r: RectPlan) {
+  return r.w * r.h;
+}
+
+function rectBBox(a: RectPlan, b: RectPlan): BBox {
+  return {
+    x0: Math.min(a.x, b.x),
+    y0: Math.min(a.y, b.y),
+    x1: Math.max(a.x + a.w, b.x + b.w),
+    y1: Math.max(a.y + a.h, b.y + b.h),
+  };
+}
+
+function rectIntersectsBBox(rect: RectPlan, bbox: BBox) {
   return !(
-    a.x + a.w <= b.x ||
-    a.x >= b.x + b.w ||
-    a.y + a.h <= b.y ||
-    a.y >= b.y + b.h
+    rect.x + rect.w <= bbox.x0 ||
+    rect.x >= bbox.x1 ||
+    rect.y + rect.h <= bbox.y0 ||
+    rect.y >= bbox.y1
   );
 }
 
-function bboxContainsTransparency(
-  grid: Uint32Array[],
-  r: { x: number; y: number; w: number; h: number }
-) {
-  for (let y = r.y; y < r.y + r.h; y += 1) {
-    for (let x = r.x; x < r.x + r.w; x += 1) {
-      if (grid[y][x] === 0) return true;
+function bboxesOverlap(a: BBox, b: BBox) {
+  return !(a.x1 <= b.x0 || b.x1 <= a.x0 || a.y1 <= b.y0 || b.y1 <= a.y0);
+}
+
+function buildTransparencyPrefix(grid: Grid): number[][] {
+  const prefix = Array.from({ length: grid.height + 1 }, () =>
+    new Array<number>(grid.width + 1).fill(0)
+  );
+  for (let y = 0; y < grid.height; y += 1) {
+    let rowSum = 0;
+    for (let x = 0; x < grid.width; x += 1) {
+      rowSum += grid.rows[y][x] === 0 ? 1 : 0;
+      prefix[y + 1][x + 1] = prefix[y][x + 1] + rowSum;
+    }
+  }
+  return prefix;
+}
+
+function bboxHasTransparencyFast(prefix: number[][], bbox: BBox) {
+  return (
+    prefix[bbox.y1][bbox.x1] -
+      prefix[bbox.y0][bbox.x1] -
+      prefix[bbox.y1][bbox.x0] +
+      prefix[bbox.y0][bbox.x0] >
+    0
+  );
+}
+
+function bboxHasTransparency(grid: Grid, bbox: BBox) {
+  for (let y = bbox.y0; y < bbox.y1; y += 1) {
+    for (let x = bbox.x0; x < bbox.x1; x += 1) {
+      if (grid.rows[y][x] === 0) return true;
     }
   }
   return false;
 }
 
-function mergedRectOverdraw(a: RectPlan, b: RectPlan, grid: Uint32Array[]) {
-  if (a.color !== b.color) return null;
-  const r = bbox(a, b);
-  if (bboxContainsTransparency(grid, r)) return null;
-  const newArea = r.w * r.h;
-  const oldArea = a.w * a.h + b.w * b.h;
-  return {
-    x: r.x,
-    y: r.y,
-    w: r.w,
-    h: r.h,
-    color: a.color,
-    extraArea: newArea - oldArea,
-    ratio: newArea / Math.max(1, oldArea),
-    newArea,
-  };
-}
-
-function mergeByOverdraw(
-  baseRects: RectPlan[],
-  grid: Uint32Array[],
-  maxPasses: number,
-  ratioLimit: number,
+function exactNonoverlapRects(
+  grid: Grid,
   progress?: ProgressSink
-): RectPlan[] {
-  const rects = [...baseRects];
-  let pass = 0;
-  while (pass < maxPasses) {
-    pass += 1;
-    let bestI = -1;
-    let bestJ = -1;
-    let best: ReturnType<typeof mergedRectOverdraw> = null;
+): RectPlanResult {
+  const used = Array.from(
+    { length: grid.height },
+    () => new Uint8Array(grid.width)
+  );
+  const rects: RectPlan[] = [];
+  let processed = 0;
+  const total = grid.width * grid.height;
 
-    for (let i = 0; i < rects.length; i += 1) {
-      const a = rects[i];
-      for (let j = i + 1; j < rects.length; j += 1) {
-        const b = rects[j];
-        if (a.color !== b.color) continue;
-        const candidate = mergedRectOverdraw(a, b, grid);
-        if (!candidate) continue;
-        if (candidate.ratio > ratioLimit) continue;
+  for (let y = 0; y < grid.height; y += 1) {
+    for (let x = 0; x < grid.width; x += 1) {
+      if (used[y][x]) {
+        processed += 1;
+        continue;
+      }
 
-        if (
-          !best ||
-          candidate.extraArea < best.extraArea ||
-          (candidate.extraArea === best.extraArea &&
-            candidate.newArea > best.newArea)
+      const color = grid.rows[y][x];
+      if (color === 0) {
+        used[y][x] = 1;
+        processed += 1;
+        continue;
+      }
+
+      const widths: number[] = [];
+      let yy = y;
+      while (yy < grid.height && !used[yy][x] && grid.rows[yy][x] === color) {
+        let runW = 0;
+        while (
+          x + runW < grid.width &&
+          !used[yy][x + runW] &&
+          grid.rows[yy][x + runW] === color
         ) {
-          best = candidate;
-          bestI = i;
-          bestJ = j;
+          runW += 1;
+        }
+        widths.push(runW);
+        yy += 1;
+      }
+
+      let bestW = 1;
+      let bestH = 1;
+      let bestArea = 1;
+      let minW: number | null = null;
+      for (let i = 0; i < widths.length; i += 1) {
+        const rowW = widths[i];
+        minW = minW == null ? rowW : Math.min(minW, rowW);
+        const h = i + 1;
+        const area = minW * h;
+        if (
+          area > bestArea ||
+          (area === bestArea && (h > bestH || (h === bestH && minW > bestW)))
+        ) {
+          bestArea = area;
+          bestW = minW;
+          bestH = h;
         }
       }
-    }
 
-    if (!best || bestI < 0 || bestJ < 0) break;
-    if (progress && pass % 20 === 0)
-      progress(
-        `Overdraw merge pass ${pass}/${maxPasses} · ${rects.length} rects`
-      );
-    rects.splice(bestJ, 1);
-    rects.splice(bestI, 1, {
-      x: best.x,
-      y: best.y,
-      w: best.w,
-      h: best.h,
-      color: best.color,
-    });
+      for (let yy2 = y; yy2 < y + bestH; yy2 += 1) {
+        for (let xx2 = x; xx2 < x + bestW; xx2 += 1) used[yy2][xx2] = 1;
+      }
+      processed += bestW * bestH;
+      if (progress && rects.length % 200 === 0)
+        progress(`exact-cover ${Math.min(processed, total)}/${total} pixels`);
+      rects.push({ x, y, w: bestW, h: bestH, color });
+    }
   }
-  return rects;
+
+  return { rects, width: grid.width, height: grid.height };
 }
 
-function deriveLayerOrder(
-  rects: RectPlan[],
-  grid: Uint32Array[]
-): number[] | null {
-  const n = rects.length;
-  const after = Array.from({ length: n }, () => new Set<number>());
-  const indeg = new Int32Array(n);
+function greedyMeshingRects(
+  grid: Grid,
+  progress?: ProgressSink
+): RectPlanResult {
+  const covered = Array.from(
+    { length: grid.height },
+    () => new Uint8Array(grid.width)
+  );
+  const rects: RectPlan[] = [];
+  let opaqueTotal = 0;
+  for (let y = 0; y < grid.height; y += 1) {
+    for (let x = 0; x < grid.width; x += 1)
+      if (grid.rows[y][x] !== 0) opaqueTotal += 1;
+  }
+  let coveredOpaque = 0;
 
-  for (let i = 0; i < n; i += 1) {
-    for (let j = i + 1; j < n; j += 1) {
-      const a = rects[i];
-      const b = rects[j];
-      if (a.color === b.color || !overlaps(a, b)) continue;
-
-      const x0 = Math.max(a.x, b.x);
-      const y0 = Math.max(a.y, b.y);
-      const x1 = Math.min(a.x + a.w, b.x + b.w);
-      const y1 = Math.min(a.y + a.h, b.y + b.h);
-
-      let needAAbove = false;
-      let needBAbove = false;
-      for (let y = y0; y < y1 && !(needAAbove && needBAbove); y += 1) {
-        for (let x = x0; x < x1 && !(needAAbove && needBAbove); x += 1) {
-          const src = grid[y][x];
-          if (src === 0 || (src === a.color && src === b.color)) continue;
-          if (src === a.color) needAAbove = true;
-          else if (src === b.color) needBAbove = true;
-        }
+  for (let y = 0; y < grid.height; y += 1) {
+    let x = 0;
+    while (x < grid.width) {
+      const color = grid.rows[y][x];
+      if (color === 0 || covered[y][x]) {
+        x += 1;
+        continue;
       }
 
-      if (needAAbove && !needBAbove) {
-        if (!after[j].has(i)) {
-          after[j].add(i);
-          indeg[i] += 1;
-        }
-      } else if (needBAbove && !needAAbove) {
-        if (!after[i].has(j)) {
-          after[i].add(j);
-          indeg[j] += 1;
-        }
-      } else if (needAAbove && needBAbove) {
-        return null;
+      let w = 1;
+      while (x + w < grid.width) {
+        const c = grid.rows[y][x + w];
+        if (c === 0 || covered[y][x + w] || c !== color) break;
+        w += 1;
       }
+
+      let h = 1;
+      while (y + h < grid.height) {
+        let ok = true;
+        for (let xx = x; xx < x + w; xx += 1) {
+          const c = grid.rows[y + h][xx];
+          if (c === 0 || covered[y + h][xx] || c !== color) {
+            ok = false;
+            break;
+          }
+        }
+        if (!ok) break;
+        h += 1;
+      }
+
+      for (let yy = y; yy < y + h; yy += 1) {
+        for (let xx = x; xx < x + w; xx += 1) covered[yy][xx] = 1;
+      }
+      rects.push({ x, y, w, h, color });
+      coveredOpaque += w * h;
+      if (progress && rects.length % 200 === 0)
+        progress(
+          `greedy-meshing ${coveredOpaque}/${opaqueTotal} opaque pixels`
+        );
+      x += w;
     }
   }
 
-  const q: number[] = [];
-  for (let i = 0; i < n; i += 1) if (indeg[i] === 0) q.push(i);
-  const out: number[] = [];
-  while (q.length) {
-    const cur = q.shift()!;
-    out.push(cur);
-    for (const next of after[cur]) {
-      indeg[next] -= 1;
-      if (indeg[next] === 0) q.push(next);
+  return { rects, width: grid.width, height: grid.height };
+}
+
+function renderBBox(rects: RectPlan[], bbox: BBox): Uint32Array[] {
+  const bw = bbox.x1 - bbox.x0;
+  const bh = bbox.y1 - bbox.y0;
+  const canvas = Array.from({ length: bh }, () => new Uint32Array(bw));
+  for (const rect of rects) {
+    const ox0 = Math.max(bbox.x0, rect.x);
+    const oy0 = Math.max(bbox.y0, rect.y);
+    const ox1 = Math.min(bbox.x1, rect.x + rect.w);
+    const oy1 = Math.min(bbox.y1, rect.y + rect.h);
+    if (ox0 >= ox1 || oy0 >= oy1) continue;
+    for (let y = oy0; y < oy1; y += 1) {
+      const row = canvas[y - bbox.y0];
+      for (let x = ox0; x < ox1; x += 1) row[x - bbox.x0] = rect.color;
     }
   }
-  if (out.length !== n) return null;
+  return canvas;
+}
+
+function targetBBox(grid: Grid, bbox: BBox): Uint32Array[] {
+  const out: Uint32Array[] = [];
+  for (let y = bbox.y0; y < bbox.y1; y += 1)
+    out.push(grid.rows[y].slice(bbox.x0, bbox.x1));
   return out;
 }
 
-function validateCoverage(rects: RectPlan[], grid: Uint32Array[]) {
-  const h = grid.length;
-  const w = grid[0]?.length ?? 0;
-  for (let y = 0; y < h; y += 1) {
-    for (let x = 0; x < w; x += 1) {
-      const src = grid[y][x];
-      if (src === 0) continue;
-      let found = false;
-      for (const r of rects) {
-        if (
-          r.color === src &&
-          x >= r.x &&
-          x < r.x + r.w &&
-          y >= r.y &&
-          y < r.y + r.h
-        ) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) return false;
-    }
+function gridsEqual(a: Uint32Array[], b: Uint32Array[]) {
+  if (a.length !== b.length) return false;
+  for (let y = 0; y < a.length; y += 1) {
+    if (a[y].length !== b[y].length) return false;
+    for (let x = 0; x < a[y].length; x += 1)
+      if (a[y][x] !== b[y][x]) return false;
   }
   return true;
 }
 
-function orderRects(
-  rects: RectPlan[],
-  grid: Uint32Array[],
-  order: "front-to-back" | "back-to-front"
+function candidatePreservesBBox(rects: RectPlan[], grid: Grid, bbox: BBox) {
+  return gridsEqual(renderBBox(rects, bbox), targetBBox(grid, bbox));
+}
+
+class MinHeap<T> {
+  private data: T[] = [];
+  constructor(private less: (a: T, b: T) => boolean) {}
+  get length() {
+    return this.data.length;
+  }
+  push(item: T) {
+    const data = this.data;
+    data.push(item);
+    let i = data.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (!this.less(data[i], data[p])) break;
+      [data[i], data[p]] = [data[p], data[i]];
+      i = p;
+    }
+  }
+  pop(): T | undefined {
+    const data = this.data;
+    if (data.length === 0) return undefined;
+    const root = data[0];
+    const last = data.pop()!;
+    if (data.length > 0) {
+      data[0] = last;
+      let i = 0;
+      while (true) {
+        const l = i * 2 + 1;
+        const r = l + 1;
+        let best = i;
+        if (l < data.length && this.less(data[l], data[best])) best = l;
+        if (r < data.length && this.less(data[r], data[best])) best = r;
+        if (best === i) break;
+        [data[i], data[best]] = [data[best], data[i]];
+        i = best;
+      }
+    }
+    return root;
+  }
+}
+
+interface MergeCandidate {
+  extraArea: number;
+  negMergedArea: number;
+  counter: number;
+  i: number;
+  j: number;
+}
+
+function fastMergeOverdrawFromSeed(
+  grid: Grid,
+  seedRects: RectPlan[],
+  progress?: ProgressSink,
+  maxPasses = 200,
+  maxOverdrawRatio: number | null = 2.5,
+  stageName = "fast-overdraw-seeded"
+): RectPlanResult {
+  const prefix = buildTransparencyPrefix(grid);
+  const rectsById = new Map<number, RectPlan>();
+  seedRects.forEach((r, i) => rectsById.set(i, r));
+  const active = new Set<number>(rectsById.keys());
+  let order = Array.from(active);
+  let nextId = seedRects.length;
+  let counter = 0;
+
+  const heap = new MinHeap<MergeCandidate>((a, b) => {
+    if (a.extraArea !== b.extraArea) return a.extraArea < b.extraArea;
+    if (a.negMergedArea !== b.negMergedArea)
+      return a.negMergedArea < b.negMergedArea;
+    return a.counter < b.counter;
+  });
+
+  function pushCandidate(i: number, j: number) {
+    if (i === j || !active.has(i) || !active.has(j)) return;
+    const a = rectsById.get(i)!;
+    const b = rectsById.get(j)!;
+    if (a.color !== b.color) return;
+    const bbox = rectBBox(a, b);
+    if (bboxHasTransparencyFast(prefix, bbox)) return;
+    const mergedArea = (bbox.x1 - bbox.x0) * (bbox.y1 - bbox.y0);
+    const oldArea = rectArea(a) + rectArea(b);
+    if (maxOverdrawRatio != null && mergedArea > oldArea * maxOverdrawRatio)
+      return;
+    counter += 1;
+    heap.push({
+      extraArea: mergedArea - oldArea,
+      negMergedArea: -mergedArea,
+      counter,
+      i,
+      j,
+    });
+  }
+
+  const byColor = new Map<number, number[]>();
+  for (const [id, rect] of rectsById) {
+    if (!byColor.has(rect.color)) byColor.set(rect.color, []);
+    byColor.get(rect.color)!.push(id);
+  }
+  for (const ids of byColor.values()) {
+    for (let a = 0; a < ids.length; a += 1)
+      for (let b = a + 1; b < ids.length; b += 1) pushCandidate(ids[a], ids[b]);
+  }
+
+  let accepted = 0;
+  let checked = 0;
+  while (heap.length && accepted < maxPasses) {
+    const cand = heap.pop()!;
+    checked += 1;
+    const { i, j } = cand;
+    if (!active.has(i) || !active.has(j)) continue;
+    const a = rectsById.get(i)!;
+    const b = rectsById.get(j)!;
+    if (a.color !== b.color) continue;
+    const bbox = rectBBox(a, b);
+    if (bboxHasTransparencyFast(prefix, bbox)) continue;
+    const merged: RectPlan = {
+      x: bbox.x0,
+      y: bbox.y0,
+      w: bbox.x1 - bbox.x0,
+      h: bbox.y1 - bbox.y0,
+      color: a.color,
+    };
+    const oldArea = rectArea(a) + rectArea(b);
+    const newArea = rectArea(merged);
+    if (maxOverdrawRatio != null && newArea > oldArea * maxOverdrawRatio)
+      continue;
+
+    const candidateOrder = order.filter((rid) => rid !== i && rid !== j);
+    const intersections: number[] = [];
+    for (let pos = 0; pos < candidateOrder.length; pos += 1) {
+      const rid = candidateOrder[pos];
+      if (rectIntersectsBBox(rectsById.get(rid)!, bbox))
+        intersections.push(pos);
+    }
+    const insertAt = intersections.length ? Math.min(...intersections) : 0;
+    const mergedId = nextId;
+    rectsById.set(mergedId, merged);
+    candidateOrder.splice(insertAt, 0, mergedId);
+    const candidateRects = candidateOrder.map((rid) => rectsById.get(rid)!);
+    if (!candidatePreservesBBox(candidateRects, grid, bbox)) {
+      rectsById.delete(mergedId);
+      continue;
+    }
+
+    nextId += 1;
+    active.delete(i);
+    active.delete(j);
+    active.add(mergedId);
+    order = candidateOrder;
+    accepted += 1;
+    for (const rid of Array.from(active))
+      if (rid !== mergedId && rectsById.get(rid)!.color === merged.color)
+        pushCandidate(mergedId, rid);
+    if (progress && (accepted === 1 || accepted % 100 === 0))
+      progress(
+        `${stageName}: ${accepted}/${maxPasses} merges · ${order.length} rects · checked ${checked}`
+      );
+  }
+
+  return {
+    rects: order.map((rid) => rectsById.get(rid)!),
+    width: grid.width,
+    height: grid.height,
+  };
+}
+
+function fastMergeOverdrawRects(
+  grid: Grid,
+  progress?: ProgressSink,
+  maxPasses = 200,
+  maxOverdrawRatio: number | null = 2.5
+): RectPlanResult {
+  const seed = exactNonoverlapRects(grid, progress);
+  return fastMergeOverdrawFromSeed(
+    grid,
+    seed.rects,
+    progress,
+    maxPasses,
+    maxOverdrawRatio,
+    "fast-overdraw"
+  );
+}
+
+function colorComponents(
+  grid: Grid
+): Array<{ color: number; count: number; bbox: BBox }> {
+  const visited = Array.from(
+    { length: grid.height },
+    () => new Uint8Array(grid.width)
+  );
+  const comps: Array<{ color: number; count: number; bbox: BBox }> = [];
+
+  for (let y = 0; y < grid.height; y += 1) {
+    for (let x = 0; x < grid.width; x += 1) {
+      if (visited[y][x]) continue;
+      const color = grid.rows[y][x];
+      visited[y][x] = 1;
+      if (color === 0) continue;
+      const stack: Array<[number, number]> = [[x, y]];
+      let count = 0;
+      let minX = x,
+        maxX = x,
+        minY = y,
+        maxY = y;
+      while (stack.length) {
+        const [cx, cy] = stack.pop()!;
+        count += 1;
+        if (cx < minX) minX = cx;
+        if (cx > maxX) maxX = cx;
+        if (cy < minY) minY = cy;
+        if (cy > maxY) maxY = cy;
+        const neigh: Array<[number, number]> = [
+          [cx - 1, cy],
+          [cx + 1, cy],
+          [cx, cy - 1],
+          [cx, cy + 1],
+        ];
+        for (const [nx, ny] of neigh) {
+          if (
+            nx < 0 ||
+            nx >= grid.width ||
+            ny < 0 ||
+            ny >= grid.height ||
+            visited[ny][nx]
+          )
+            continue;
+          if (grid.rows[ny][nx] === color) {
+            visited[ny][nx] = 1;
+            stack.push([nx, ny]);
+          }
+        }
+      }
+      comps.push({
+        color,
+        count,
+        bbox: { x0: minX, y0: minY, x1: maxX + 1, y1: maxY + 1 },
+      });
+    }
+  }
+  return comps;
+}
+
+function collectUnderpaintCandidates(
+  grid: Grid,
+  progress?: ProgressSink,
+  maxBBoxRatio = 6.0,
+  minComponentPixels = 8,
+  minSavings = 2
+): UnderpaintCandidate[] {
+  const prefix = buildTransparencyPrefix(grid);
+  const comps = colorComponents(grid);
+  const candidates: UnderpaintCandidate[] = [];
+  for (let index = 0; index < comps.length; index += 1) {
+    const { color, count, bbox } = comps[index];
+    const bw = bbox.x1 - bbox.x0;
+    const bh = bbox.y1 - bbox.y0;
+    const area = bw * bh;
+    if (
+      count < minComponentPixels ||
+      area <= 1 ||
+      area / Math.max(count, 1) > maxBBoxRatio
+    )
+      continue;
+    if (bboxHasTransparencyFast(prefix, bbox)) continue;
+
+    const patchFull = subGridWithRemovedColor(grid, bbox);
+    const baseline = greedyMeshingRects(patchFull).rects.length;
+    const patchResidual = subGridWithRemovedColor(grid, bbox, color);
+    const corrections = greedyMeshingRects(patchResidual).rects;
+    const underpaintN = 1 + corrections.length;
+    const savings = baseline - underpaintN;
+    if (savings >= minSavings)
+      candidates.push({ color, bbox, savings, count, area, corrections });
+    if (progress && index % 200 === 0)
+      progress(`underpaint candidates ${index + 1}/${comps.length}`);
+  }
+  candidates.sort(
+    (a, b) => b.savings - a.savings || b.count - a.count || a.area - b.area
+  );
+  return candidates;
+}
+
+function selectUnderpaintCandidatesGreedy(
+  candidates: UnderpaintCandidate[],
+  width: number,
+  height: number
 ) {
-  if (!validateCoverage(rects, grid)) return null;
-  const layer = deriveLayerOrder(rects, grid);
-  if (!layer) return null;
-  const backToFront = layer.map((i) => rects[i]);
-  return order === "back-to-front" ? backToFront : [...backToFront].reverse();
+  const occupied = Array.from({ length: height }, () => new Uint8Array(width));
+  const accepted: UnderpaintCandidate[] = [];
+  function clear(bbox: BBox) {
+    for (let y = bbox.y0; y < bbox.y1; y += 1)
+      for (let x = bbox.x0; x < bbox.x1; x += 1)
+        if (occupied[y][x]) return false;
+    return true;
+  }
+  function mark(bbox: BBox) {
+    for (let y = bbox.y0; y < bbox.y1; y += 1)
+      for (let x = bbox.x0; x < bbox.x1; x += 1) occupied[y][x] = 1;
+  }
+  for (const cand of candidates)
+    if (clear(cand.bbox)) {
+      accepted.push(cand);
+      mark(cand.bbox);
+    }
+  return accepted;
 }
 
-function tryCandidate(
-  name: string,
-  rects: RectPlan[],
-  grid: Uint32Array[],
-  order: "front-to-back" | "back-to-front"
-): Candidate | null {
-  const ordered = orderRects(rects, grid, order);
-  if (!ordered) return null;
-  return { name, rects: ordered };
+function bitCount(v: bigint) {
+  let n = 0;
+  while (v) {
+    n += Number(v & 1n);
+    v >>= 1n;
+  }
+  return n;
 }
 
-function twoStageMerge(
-  exact: RectPlan[],
-  grid: Uint32Array[],
+function selectUnderpaintCandidatesBeam(
+  candidates: UnderpaintCandidate[],
+  beamWidth = 64,
+  maxCandidates = 256,
+  progress?: ProgressSink
+) {
+  const cand = candidates.slice(0, maxCandidates);
+  const n = cand.length;
+  if (!n) return [];
+  const conflict = new Array<bigint>(n).fill(0n);
+  for (let i = 0; i < n; i += 1) {
+    let mask = 1n << BigInt(i);
+    for (let j = i + 1; j < n; j += 1) {
+      if (bboxesOverlap(cand[i].bbox, cand[j].bbox)) {
+        mask |= 1n << BigInt(j);
+        conflict[j] |= 1n << BigInt(i);
+      }
+    }
+    conflict[i] |= mask;
+  }
+  let states: Array<{ score: number; selected: bigint; forbidden: bigint }> = [
+    { score: 0, selected: 0n, forbidden: 0n },
+  ];
+  for (let i = 0; i < n; i += 1) {
+    const bit = 1n << BigInt(i);
+    const next: Array<{ score: number; selected: bigint; forbidden: bigint }> =
+      [];
+    for (const state of states) {
+      next.push(state);
+      if ((state.forbidden & bit) === 0n)
+        next.push({
+          score: state.score + cand[i].savings,
+          selected: state.selected | bit,
+          forbidden: state.forbidden | conflict[i],
+        });
+    }
+    const best = new Map<
+      string,
+      { score: number; selected: bigint; forbidden: bigint }
+    >();
+    for (const state of next) {
+      const key = state.selected.toString();
+      const prev = best.get(key);
+      if (!prev || state.score > prev.score) best.set(key, state);
+    }
+    states = Array.from(best.values())
+      .sort(
+        (a, b) =>
+          b.score - a.score || bitCount(b.selected) - bitCount(a.selected)
+      )
+      .slice(0, beamWidth);
+    if (progress && i % 50 === 0) progress(`underpaint beam ${i + 1}/${n}`);
+  }
+  const best = states.reduce((a, b) => (b.score > a.score ? b : a), states[0]);
+  const accepted: UnderpaintCandidate[] = [];
+  for (let i = 0; i < n; i += 1)
+    if (best.selected & (1n << BigInt(i))) accepted.push(cand[i]);
+  return accepted;
+}
+
+function assembleUnderpaintSolution(
+  grid: Grid,
+  accepted: UnderpaintCandidate[]
+): RectPlanResult {
+  const occupied = Array.from(
+    { length: grid.height },
+    () => new Uint8Array(grid.width)
+  );
+  function mark(bbox: BBox) {
+    for (let y = bbox.y0; y < bbox.y1; y += 1)
+      for (let x = bbox.x0; x < bbox.x1; x += 1) occupied[y][x] = 1;
+  }
+  accepted.forEach((c) => mark(c.bbox));
+  const rects: RectPlan[] = [];
+  for (const c of accepted)
+    rects.push({
+      x: c.bbox.x0,
+      y: c.bbox.y0,
+      w: c.bbox.x1 - c.bbox.x0,
+      h: c.bbox.y1 - c.bbox.y0,
+      color: c.color,
+    });
+  for (const c of accepted)
+    rects.push(...offsetRects(c.corrections, c.bbox.x0, c.bbox.y0));
+
+  const residual = makeGrid(grid.width, grid.height);
+  for (let y = 0; y < grid.height; y += 1)
+    for (let x = 0; x < grid.width; x += 1)
+      if (!occupied[y][x]) residual.rows[y][x] = grid.rows[y][x];
+  rects.push(...greedyMeshingRects(residual).rects);
+  return { rects, width: grid.width, height: grid.height };
+}
+
+function componentUnderpaintRects(
+  grid: Grid,
+  progress?: ProgressSink,
+  maxBBoxRatio = 6.0,
+  minComponentPixels = 8,
+  minSavings = 2
+): RectPlanResult {
+  const candidates = collectUnderpaintCandidates(
+    grid,
+    progress,
+    maxBBoxRatio,
+    minComponentPixels,
+    minSavings
+  );
+  const accepted = selectUnderpaintCandidatesGreedy(
+    candidates,
+    grid.width,
+    grid.height
+  );
+  return assembleUnderpaintSolution(grid, accepted);
+}
+
+function componentUnderpaintBeamRects(
+  grid: Grid,
+  progress?: ProgressSink,
+  maxBBoxRatio = 6.0,
+  minComponentPixels = 8,
+  minSavings = 2,
+  beamWidth = 64,
+  maxCandidates = 256
+): RectPlanResult {
+  const candidates = collectUnderpaintCandidates(
+    grid,
+    progress,
+    maxBBoxRatio,
+    minComponentPixels,
+    minSavings
+  );
+  const accepted = selectUnderpaintCandidatesBeam(
+    candidates,
+    beamWidth,
+    maxCandidates,
+    progress
+  );
+  return assembleUnderpaintSolution(grid, accepted);
+}
+
+function twoStageOverdrawRects(
+  grid: Grid,
+  progress?: ProgressSink,
+  stage1Passes = 1200,
+  stage1Ratio = 3.0,
+  stage2Passes = 2000,
+  stage2Ratio = 10.0
+): RectPlanResult {
+  progress?.(
+    `two-stage-overdraw stage 1: passes=${stage1Passes}, ratio=${stage1Ratio}`
+  );
+  const seed = fastMergeOverdrawRects(
+    grid,
+    undefined,
+    stage1Passes,
+    stage1Ratio
+  );
+  progress?.(`two-stage-overdraw stage 1 result: ${seed.rects.length} shapes`);
+  progress?.(
+    `two-stage-overdraw stage 2: passes=${stage2Passes}, ratio=${stage2Ratio}`
+  );
+  const result = fastMergeOverdrawFromSeed(
+    grid,
+    seed.rects,
+    undefined,
+    stage2Passes,
+    stage2Ratio,
+    "two-stage-overdraw-stage2"
+  );
+  progress?.(`two-stage-overdraw final result: ${result.rects.length} shapes`);
+  return result;
+}
+
+function bestFastRects(
+  grid: Grid,
   config: GeneratorConfig,
   progress?: ProgressSink
-): RectPlan[] {
-  progress?.("Running safe two-stage overdraw");
-  const stage1 = mergeByOverdraw(
-    exact,
-    grid,
-    config.stage1Passes,
-    config.stage1Ratio,
-    progress
-  );
+): RectPlanResult {
+  const start = nowMs();
+  const candidates: Array<{ name: string; result: RectPlanResult }> = [];
+  let beamSeed: RectPlan[] | null = null;
+  const maxOverdrawRatio = config.maxOverdrawRatio ?? 2.5;
+  const withinBudget = () => nowMs() - start < config.safeTimeSeconds * 1000;
+  const record = (name: string, result: RectPlanResult) => {
+    candidates.push({ name, result });
+    progress?.(`${name}: ${result.rects.length} shapes`);
+  };
 
-  const stage2 = mergeByOverdraw(
-    stage1,
-    grid,
-    config.stage2Passes,
-    config.stage2Ratio,
-    progress
-  );
+  record("greedy-meshing", greedyMeshingRects(grid));
+  if (withinBudget())
+    record(
+      "component-underpaint",
+      componentUnderpaintRects(
+        grid,
+        progress,
+        config.underpaintMaxBBoxRatio,
+        config.underpaintMinComponentPixels,
+        config.underpaintMinSavings
+      )
+    );
+  if (withinBudget()) {
+    const result = componentUnderpaintBeamRects(
+      grid,
+      progress,
+      config.underpaintMaxBBoxRatio,
+      config.underpaintMinComponentPixels,
+      config.underpaintMinSavings,
+      config.underpaintBeamWidth,
+      config.underpaintBeamCandidates
+    );
+    beamSeed = result.rects;
+    record("component-underpaint-beam", result);
+  }
 
-  return stage2;
+  const ladder: Array<[number, number]> = [
+    [Math.min(config.maxMergePasses, 400), maxOverdrawRatio],
+    [Math.max(config.maxMergePasses, 800), Math.max(2.5, maxOverdrawRatio)],
+    [Math.max(config.maxMergePasses, 1200), Math.max(3.0, maxOverdrawRatio)],
+  ];
+  const seen = new Set<string>();
+  for (const [passes, ratio] of ladder) {
+    const key = `${passes}/${ratio}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!withinBudget()) break;
+    progress?.(`trying fast-overdraw passes=${passes}, ratio=${ratio}`);
+    record(
+      `fast-overdraw(${passes},${ratio})`,
+      fastMergeOverdrawRects(grid, undefined, passes, ratio)
+    );
+  }
+
+  if (beamSeed && withinBudget()) {
+    const passes = Math.max(config.maxMergePasses, 800);
+    const ratio = Math.max(3.0, maxOverdrawRatio);
+    progress?.(`trying seeded fast-overdraw passes=${passes}, ratio=${ratio}`);
+    record(
+      `fast-overdraw-seeded(${passes},${ratio})`,
+      fastMergeOverdrawFromSeed(
+        grid,
+        beamSeed,
+        undefined,
+        passes,
+        ratio,
+        "fast-overdraw-seeded"
+      )
+    );
+  }
+
+  if (withinBudget()) {
+    record(
+      `two-stage-overdraw(${config.stage1Passes}/${config.stage1Ratio},${config.stage2Passes}/${config.stage2Ratio})`,
+      twoStageOverdrawRects(
+        grid,
+        progress,
+        config.stage1Passes,
+        config.stage1Ratio,
+        config.stage2Passes,
+        config.stage2Ratio
+      )
+    );
+  }
+
+  candidates.sort((a, b) => a.result.rects.length - b.result.rects.length);
+  progress?.(
+    `safe-overdraw chose ${candidates[0].name}: ${candidates[0].result.rects.length} shapes`
+  );
+  return candidates[0].result;
+}
+
+function orderRectsBackToFront(
+  rects: RectPlan[],
+  grid: Grid
+): RectPlan[] | null {
+  const remaining = rects.map((_, i) => i);
+  const frontCovered = Array.from(
+    { length: grid.height },
+    () => new Uint8Array(grid.width)
+  );
+  const frontToBack: RectPlan[] = [];
+
+  function canBeNextFront(rect: RectPlan) {
+    for (let y = rect.y; y < rect.y + rect.h; y += 1) {
+      for (let x = rect.x; x < rect.x + rect.w; x += 1) {
+        if (frontCovered[y][x]) continue;
+        if (grid.rows[y][x] !== rect.color) return false;
+      }
+    }
+    return true;
+  }
+  function markFront(rect: RectPlan) {
+    for (let y = rect.y; y < rect.y + rect.h; y += 1)
+      for (let x = rect.x; x < rect.x + rect.w; x += 1) frontCovered[y][x] = 1;
+  }
+
+  while (remaining.length) {
+    let pickedPos = -1;
+    remaining
+      .map((idx, pos) => ({ idx, pos, area: rectArea(rects[idx]) }))
+      .sort((a, b) => a.area - b.area || a.idx - b.idx)
+      .some(({ idx, pos }) => {
+        if (canBeNextFront(rects[idx])) {
+          pickedPos = pos;
+          return true;
+        }
+        return false;
+      });
+    if (pickedPos < 0) return null;
+    const [idx] = remaining.splice(pickedPos, 1);
+    frontToBack.push(rects[idx]);
+    markFront(rects[idx]);
+  }
+  return frontToBack.reverse();
+}
+
+function renderRectsToGrid(
+  rects: RectPlan[],
+  width: number,
+  height: number
+): Uint32Array[] {
+  const canvas = Array.from({ length: height }, () => new Uint32Array(width));
+  for (const rect of rects) {
+    for (let y = rect.y; y < rect.y + rect.h; y += 1)
+      for (let x = rect.x; x < rect.x + rect.w; x += 1)
+        canvas[y][x] = rect.color;
+  }
+  return canvas;
+}
+
+function rectOrderMatchesTarget(rectsBackToFront: RectPlan[], grid: Grid) {
+  return gridsEqual(
+    renderRectsToGrid(rectsBackToFront, grid.width, grid.height),
+    grid.rows
+  );
 }
 
 export function optimizeImage(
@@ -342,94 +989,40 @@ export function optimizeImage(
   progress?: ProgressSink
 ): RectPlan[] {
   const grid = buildGrid(imageData);
+  let result: RectPlanResult;
 
-  progress?.("Building exact rectangle cover");
-  const exact = exactGreedyRectangles(grid, progress);
-
-  // exact mode
   if (config.optimization === "exact") {
-    const exactCandidate = tryCandidate(
-      "exact",
-      exact,
+    progress?.("optimization: exact");
+    result = exactNonoverlapRects(grid, progress);
+  } else if (config.optimization === "fast-overdraw") {
+    progress?.("optimization: fast-overdraw");
+    result = fastMergeOverdrawRects(
       grid,
-      config.exportLayerOrder
-    );
-    if (!exactCandidate) {
-      throw new Error("Could not produce a valid exact rectangle plan");
-    }
-    progress?.(`Chosen plan: exact (${exactCandidate.rects.length} shapes)`);
-    return exactCandidate.rects;
-  }
-
-  // fast-overdraw mode
-  if (config.optimization === "fast-overdraw") {
-    progress?.("Trying fast overdraw");
-    const fastMerged = mergeByOverdraw(
-      exact,
-      grid,
+      progress,
       config.maxMergePasses,
-      config.stage1Ratio,
-      progress
+      config.maxOverdrawRatio ?? 2.5
     );
-
-    const fastCandidate = tryCandidate(
-      "fast-overdraw",
-      fastMerged,
-      grid,
-      config.exportLayerOrder
-    );
-
-    if (fastCandidate) {
-      progress?.(
-        `Chosen plan: fast-overdraw (${fastCandidate.rects.length} shapes)`
-      );
-      return fastCandidate.rects;
-    }
-
-    const exactCandidate = tryCandidate(
-      "exact",
-      exact,
-      grid,
-      config.exportLayerOrder
-    );
-    if (!exactCandidate) {
-      throw new Error("Could not produce a valid rectangle plan");
-    }
-    progress?.(
-      `Fast overdraw invalid, falling back to exact (${exactCandidate.rects.length} shapes)`
-    );
-    return exactCandidate.rects;
+  } else {
+    progress?.("optimization: safe-overdraw");
+    result = bestFastRects(grid, config, progress);
   }
 
-  // safe-overdraw mode:
-  // only two-stage + exact fallback
-  const twoStageRects = twoStageMerge(exact, grid, config, progress);
-  const twoStageCandidate = tryCandidate(
-    "safe-two-stage",
-    twoStageRects,
-    grid,
-    config.exportLayerOrder
-  );
-
-  if (twoStageCandidate) {
-    progress?.(
-      `Chosen plan: safe-two-stage (${twoStageCandidate.rects.length} shapes)`
-    );
-    return twoStageCandidate.rects;
+  let orderedBackToFront = orderRectsBackToFront(result.rects, grid);
+  if (
+    !orderedBackToFront ||
+    !rectOrderMatchesTarget(orderedBackToFront, grid)
+  ) {
+    progress?.("layer-order invalid; falling back to exact cover");
+    result = exactNonoverlapRects(grid, progress);
+    orderedBackToFront = orderRectsBackToFront(result.rects, grid);
   }
-
-  const exactCandidate = tryCandidate(
-    "exact",
-    exact,
-    grid,
-    config.exportLayerOrder
-  );
-  if (!exactCandidate) {
+  if (!orderedBackToFront)
     throw new Error("Could not produce a valid rectangle plan");
-  }
 
-  progress?.(
-    `Safe overdraw fallback: exact (${exactCandidate.rects.length} shapes)`
-  );
-  return exactCandidate.rects;
+  const output =
+    config.exportLayerOrder === "back-to-front"
+      ? orderedBackToFront
+      : [...orderedBackToFront].reverse();
+  progress?.(`Chosen plan: ${output.length} shapes`);
+  return output;
 }

@@ -17,11 +17,17 @@ const DEFAULT_CONFIG: GeneratorConfig = {
   keepParentPosition: false,
   yDown: false,
   exportLayerOrder: "front-to-back",
-  maxMergePasses: 250,
+  maxMergePasses: 200,
+  maxOverdrawRatio: 2.5,
   safeTimeSeconds: 10,
-  stage1Passes: 300,
+  underpaintMaxBBoxRatio: 6,
+  underpaintMinComponentPixels: 8,
+  underpaintMinSavings: 2,
+  underpaintBeamWidth: 64,
+  underpaintBeamCandidates: 256,
+  stage1Passes: 1200,
   stage1Ratio: 3,
-  stage2Passes: 800,
+  stage2Passes: 2000,
   stage2Ratio: 10,
 };
 
@@ -60,7 +66,7 @@ export default function App() {
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [status, setStatus] = useState<string>("Choose a PNG to begin.");
   const [busy, setBusy] = useState(false);
-  const [downloadUrl, setDownloadUrl] = useState<string>("");
+  const [downloadBlob, setDownloadBlob] = useState<Blob | null>(null);
   const [downloadName, setDownloadName] = useState<string>("output.gia");
   const [stats, setStats] = useState<GenerationStats | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -76,12 +82,10 @@ export default function App() {
       if (msg.type === "progress") {
         setStatus(msg.message);
       } else if (msg.type === "done") {
-        if (downloadUrl) URL.revokeObjectURL(downloadUrl);
         const blob = new Blob([msg.giaBytes], {
           type: "application/octet-stream",
         });
-        const url = URL.createObjectURL(blob);
-        setDownloadUrl(url);
+        setDownloadBlob(blob);
         setDownloadName(msg.downloadName);
         setStats(msg.stats);
         setStatus(`Done. ${msg.stats.shapeCount} shapes generated.`);
@@ -93,7 +97,6 @@ export default function App() {
     };
     return () => {
       worker.terminate();
-      if (downloadUrl) URL.revokeObjectURL(downloadUrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -109,7 +112,7 @@ export default function App() {
   }, [file]);
 
   const canGenerate = !!file && !busy;
-  const canDownload = !!downloadUrl && !busy;
+  const canDownload = !!downloadBlob && !busy;
 
   const summary = useMemo(() => {
     if (!stats) return "No export yet.";
@@ -122,7 +125,7 @@ export default function App() {
     if (!file || !workerRef.current) return;
     setBusy(true);
     setStats(null);
-    setDownloadUrl("");
+    setDownloadBlob(null);
     setStatus("Reading PNG");
 
     try {
@@ -151,25 +154,31 @@ export default function App() {
 
   function handleImageChange(nextFile: File | null) {
     setFile(nextFile);
-    setDownloadUrl("");
+    setDownloadBlob(null);
     setStats(null);
 
     if (nextFile) {
       const nextParentName = parentNameFromFile(nextFile);
-      setConfig((prev) => ({
-        ...prev,
-        parentName: nextParentName,
-      }));
+      setConfig((prev) => ({ ...prev, parentName: nextParentName }));
       setStatus(
         `Loaded ${nextFile.name}. Parent name set to "${nextParentName}".`
       );
     } else {
-      setConfig((prev) => ({
-        ...prev,
-        parentName: DEFAULT_CONFIG.parentName,
-      }));
+      setConfig((prev) => ({ ...prev, parentName: DEFAULT_CONFIG.parentName }));
       setStatus("Choose a PNG to begin.");
     }
+  }
+
+  function handleDownload() {
+    if (!downloadBlob) return;
+    const url = URL.createObjectURL(downloadBlob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = downloadName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
   }
 
   return (
@@ -181,8 +190,8 @@ export default function App() {
             <p className="eyebrow">GIA Pixel Builder</p>
             <h1>PNG → .gia</h1>
             <p className="subtitle">
-              Browser-only .gia generator for pixel art. Higher res images may
-              cause slowdown in game.
+              Browser converter for png to .gia. Large images may take a long
+              time to convert and lag the game upon import.
             </p>
           </div>
 
@@ -305,7 +314,102 @@ export default function App() {
                   min="0"
                   value={config.maxMergePasses}
                   onChange={(e) =>
-                    update("maxMergePasses", numberValue(e.target.value, 250))
+                    update("maxMergePasses", numberValue(e.target.value, 200))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Max Overdraw Ratio</span>
+                <input
+                  type="number"
+                  min="1"
+                  step="0.1"
+                  value={config.maxOverdrawRatio}
+                  onChange={(e) =>
+                    update("maxOverdrawRatio", numberValue(e.target.value, 2.5))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Safe Time Seconds</span>
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.5"
+                  value={config.safeTimeSeconds}
+                  onChange={(e) =>
+                    update("safeTimeSeconds", numberValue(e.target.value, 10))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Underpaint BBox Ratio</span>
+                <input
+                  type="number"
+                  min="1"
+                  step="0.1"
+                  value={config.underpaintMaxBBoxRatio}
+                  onChange={(e) =>
+                    update(
+                      "underpaintMaxBBoxRatio",
+                      numberValue(e.target.value, 6)
+                    )
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Underpaint Min Pixels</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={config.underpaintMinComponentPixels}
+                  onChange={(e) =>
+                    update(
+                      "underpaintMinComponentPixels",
+                      numberValue(e.target.value, 8)
+                    )
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Underpaint Min Savings</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={config.underpaintMinSavings}
+                  onChange={(e) =>
+                    update(
+                      "underpaintMinSavings",
+                      numberValue(e.target.value, 2)
+                    )
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Underpaint Beam Width</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={config.underpaintBeamWidth}
+                  onChange={(e) =>
+                    update(
+                      "underpaintBeamWidth",
+                      numberValue(e.target.value, 64)
+                    )
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Underpaint Beam Candidates</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={config.underpaintBeamCandidates}
+                  onChange={(e) =>
+                    update(
+                      "underpaintBeamCandidates",
+                      numberValue(e.target.value, 256)
+                    )
                   }
                 />
               </label>
@@ -384,17 +488,13 @@ export default function App() {
             >
               {busy ? "Generating…" : "Generate .gia"}
             </button>
-            <a
+            <button
               className={`secondary-btn ${canDownload ? "" : "disabled"}`}
-              href={canDownload ? downloadUrl : undefined}
-              download={downloadName}
-              aria-disabled={!canDownload}
-              onClick={(e) => {
-                if (!canDownload) e.preventDefault();
-              }}
+              disabled={!canDownload}
+              onClick={handleDownload}
             >
               Download .gia
-            </a>
+            </button>
           </div>
 
           <div className="status-panel">
