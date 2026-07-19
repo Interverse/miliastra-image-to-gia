@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/lib/gia.ts","./src/lib/optimizer.ts","./src/lib/proto.ts","./src/lib/types.ts","./src/lib/utils.ts","./src/workers/generator.worker.ts"],"version":"5.9.3"}

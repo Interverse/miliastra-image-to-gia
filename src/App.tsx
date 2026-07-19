@@ -238,6 +238,7 @@ export default function App() {
             </p>
           </div>
 
+          <h2 className="section-title">Conversion</h2>
           <div className="control-grid">
             <label className="field field-file">
               <span>Image</span>
@@ -288,6 +289,7 @@ export default function App() {
             </label>
           </div>
 
+          <h2 className="section-title">Device Scales</h2>
           <div
             className="scale-config-row"
             aria-label="Device scale configurations"
