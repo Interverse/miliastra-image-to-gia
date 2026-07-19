@@ -1,31 +1,35 @@
-# dependencies
+# Dependencies
 node_modules/
+package-lock.json
 
-# build output
+# Build output
 dist/
 build/
 
-# local env files
+# Env / secrets
 .env
-.env.local
-.env.*.local
+.env.*
 
-# logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# OS/editor files
+# OS files
 .DS_Store
 Thumbs.db
+
+# Editor files
 .vscode/
 .idea/
+*.swp
 
-# TypeScript / Vite cache
-*.tsbuildinfo
-.vite/
+# Claude
+.claude/
+CLAUDE.md
+CLAUDE.local.md
 
-# optional package manager caches
-.pnpm-store/
-.yarn/
+# Logs
+*.log
+npm-debug.log*
+
+#docs
+docs/
+
+# Reference files
+reference/
