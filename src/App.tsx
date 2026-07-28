@@ -121,6 +121,7 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.lang = HTML_LANGS[lang];
+    document.title = translate(lang, "appEyebrow");
   }, [lang]);
 
   // Live cross-site sync: a language picked on another toolkit tab updates
@@ -296,7 +297,7 @@ export default function App() {
         <section className="left-pane">
           <div className="title-block">
             <div className="title-row">
-              <p className="eyebrow">GIA Pixel Builder</p>
+              <p className="eyebrow">{t("appEyebrow")}</p>
               <select
                 className="lang-select"
                 aria-label={t("languageLabel")}

@@ -3,6 +3,7 @@
 // type-checked against it so a missing key is a compile error.
 
 const en = {
+  appEyebrow: "GIA Pixel Builder",
   languageLabel: "Language",
   appSubtitle:
     "Browser converter for png to .gia. Large images may take a long time to convert and lag the game upon import.",
@@ -67,6 +68,7 @@ export type MessageKey = keyof typeof en;
 type Table = Record<MessageKey, string>;
 
 const zhs: Table = {
+  appEyebrow: "GIA 像素画生成器",
   languageLabel: "语言",
   appSubtitle:
     "在浏览器中将 PNG 转换为 .gia。大图转换可能耗时较长，导入后也可能导致游戏卡顿。",
@@ -128,6 +130,7 @@ const zhs: Table = {
 };
 
 const zht: Table = {
+  appEyebrow: "GIA 像素畫生成器",
   languageLabel: "語言",
   appSubtitle:
     "在瀏覽器中將 PNG 轉換為 .gia。大圖轉換可能耗時較長，匯入後也可能導致遊戲卡頓。",
@@ -189,6 +192,7 @@ const zht: Table = {
 };
 
 const ja: Table = {
+  appEyebrow: "GIA ドット絵ビルダー",
   languageLabel: "言語",
   appSubtitle:
     "ブラウザーで PNG を .gia に変換します。大きな画像は変換に時間がかかり、インポート後にゲームが重くなることがあります。",
@@ -250,6 +254,7 @@ const ja: Table = {
 };
 
 const ko: Table = {
+  appEyebrow: "GIA 픽셀 아트 빌더",
   languageLabel: "언어",
   appSubtitle:
     "브라우저에서 PNG를 .gia로 변환합니다. 큰 이미지는 변환에 오래 걸릴 수 있고, 가져오면 게임이 느려질 수 있습니다.",
@@ -311,6 +316,7 @@ const ko: Table = {
 };
 
 const es: Table = {
+  appEyebrow: "Creador de Pixel Art GIA",
   languageLabel: "Idioma",
   appSubtitle:
     "Convertidor en el navegador de PNG a .gia. Las imágenes grandes pueden tardar mucho en convertirse y ralentizar el juego al importarlas.",
@@ -372,6 +378,7 @@ const es: Table = {
 };
 
 const fr: Table = {
+  appEyebrow: "Créateur de Pixel Art GIA",
   languageLabel: "Langue",
   appSubtitle:
     "Convertisseur PNG vers .gia dans le navigateur. Les grandes images peuvent être longues à convertir et faire ralentir le jeu à l'import.",
@@ -433,6 +440,7 @@ const fr: Table = {
 };
 
 const ru: Table = {
+  appEyebrow: "Конструктор пиксель-арта GIA",
   languageLabel: "Язык",
   appSubtitle:
     "Конвертер PNG в .gia прямо в браузере. Большие изображения могут конвертироваться долго и вызывать лаги в игре после импорта.",
@@ -494,6 +502,7 @@ const ru: Table = {
 };
 
 const th: Table = {
+  appEyebrow: "เครื่องมือสร้างพิกเซลอาร์ต GIA",
   languageLabel: "ภาษา",
   appSubtitle:
     "ตัวแปลง PNG เป็น .gia ในเบราว์เซอร์ รูปภาพขนาดใหญ่อาจใช้เวลาแปลงนานและทำให้เกมกระตุกเมื่อนำเข้า",
@@ -555,6 +564,7 @@ const th: Table = {
 };
 
 const vi: Table = {
+  appEyebrow: "Trình tạo Pixel Art GIA",
   languageLabel: "Ngôn ngữ",
   appSubtitle:
     "Trình chuyển đổi PNG sang .gia ngay trên trình duyệt. Ảnh lớn có thể mất nhiều thời gian chuyển đổi và gây giật lag khi nhập vào game.",
@@ -616,6 +626,7 @@ const vi: Table = {
 };
 
 const de: Table = {
+  appEyebrow: "GIA Pixel-Art-Builder",
   languageLabel: "Sprache",
   appSubtitle:
     "Browser-Konverter von PNG zu .gia. Große Bilder können lange dauern und das Spiel nach dem Import verlangsamen.",
@@ -677,6 +688,7 @@ const de: Table = {
 };
 
 const id: Table = {
+  appEyebrow: "Pembuat Pixel Art GIA",
   languageLabel: "Bahasa",
   appSubtitle:
     "Konverter PNG ke .gia di browser. Gambar besar bisa butuh waktu lama untuk dikonversi dan membuat game lag saat diimpor.",
@@ -738,6 +750,7 @@ const id: Table = {
 };
 
 const pt: Table = {
+  appEyebrow: "Criador de Pixel Art GIA",
   languageLabel: "Idioma",
   appSubtitle:
     "Conversor de PNG para .gia no navegador. Imagens grandes podem demorar para converter e causar lag no jogo ao importar.",
@@ -799,6 +812,7 @@ const pt: Table = {
 };
 
 const tr: Table = {
+  appEyebrow: "GIA Piksel Sanatı Oluşturucusu",
   languageLabel: "Dil",
   appSubtitle:
     "Tarayıcıda PNG'den .gia'ya dönüştürücü. Büyük görsellerin dönüştürülmesi uzun sürebilir ve içe aktarıldığında oyunu yavaşlatabilir.",
@@ -860,6 +874,7 @@ const tr: Table = {
 };
 
 const it: Table = {
+  appEyebrow: "Creatore di Pixel Art GIA",
   languageLabel: "Lingua",
   appSubtitle:
     "Convertitore da PNG a .gia nel browser. Le immagini grandi possono richiedere molto tempo e rallentare il gioco dopo l'importazione.",
