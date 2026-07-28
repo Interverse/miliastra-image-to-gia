@@ -5,6 +5,18 @@ import type {
   GenerationStats,
   Optimization,
 } from "./lib/types";
+import {
+  HTML_LANGS,
+  LANG_NAMES,
+  MILIASTRA_LANGS,
+  SHARED_LANG_KEY,
+  isValidLang,
+  resolveLang,
+  saveLang,
+  translate,
+  type Lang,
+  type MessageKey,
+} from "./lib/i18n";
 import type { WorkerRequest, WorkerResponse } from "./workers/generator.worker";
 
 const DEFAULT_CONFIG: GeneratorConfig = {
@@ -38,12 +50,26 @@ const DEFAULT_CONFIG: GeneratorConfig = {
   stage2Ratio: 10,
 };
 
-const DEVICE_SCALE_FIELDS: Array<{ key: DeviceScaleKey; label: string }> = [
-  { key: "desktop", label: "Desktop" },
-  { key: "mobile", label: "Mobile" },
-  { key: "controller", label: "Controller" },
-  { key: "mobileController", label: "Mobile Controller" },
+const DEVICE_SCALE_FIELDS: Array<{ key: DeviceScaleKey; labelKey: MessageKey }> = [
+  { key: "desktop", labelKey: "deviceDesktop" },
+  { key: "mobile", labelKey: "deviceMobile" },
+  { key: "controller", labelKey: "deviceController" },
+  { key: "mobileController", labelKey: "deviceMobileController" },
 ];
+
+// Known worker progress strings mapped to translation keys; anything else
+// (e.g. optimizer pass counters) is shown verbatim.
+const WORKER_PROGRESS_KEYS: Record<string, MessageKey> = {
+  "Loading schema and template": "statusLoadingSchema",
+  "Optimizing rectangles": "statusOptimizing",
+  "Encoding .gia file": "statusEncoding",
+};
+
+// Status is stored as a key + params (or a raw string) so it re-renders in
+// the right language when the user switches mid-run.
+type StatusMessage =
+  | { key: MessageKey; params?: Record<string, string | number> }
+  | { raw: string };
 
 function numberValue(value: string, fallback: number) {
   const n = Number(value);
@@ -75,15 +101,39 @@ async function fileToImageData(file: File): Promise<ImageData> {
 
 export default function App() {
   const workerRef = useRef<Worker | null>(null);
+  const [lang, setLang] = useState<Lang>(() => resolveLang());
   const [config, setConfig] = useState<GeneratorConfig>(DEFAULT_CONFIG);
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>("");
-  const [status, setStatus] = useState<string>("Choose a PNG to begin.");
+  const [status, setStatus] = useState<StatusMessage>({ key: "statusChoosePng" });
   const [busy, setBusy] = useState(false);
   const [downloadBlob, setDownloadBlob] = useState<Blob | null>(null);
   const [downloadName, setDownloadName] = useState<string>("output.gia");
   const [stats, setStats] = useState<GenerationStats | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  const t = useMemo(
+    () =>
+      (key: MessageKey, params?: Record<string, string | number>) =>
+        translate(lang, key, params),
+    [lang]
+  );
+
+  useEffect(() => {
+    document.documentElement.lang = HTML_LANGS[lang];
+  }, [lang]);
+
+  // Live cross-site sync: a language picked on another toolkit tab updates
+  // this one. Must not write back to localStorage (see docs/language-sync.md).
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === SHARED_LANG_KEY && e.newValue && isValidLang(e.newValue)) {
+        setLang(e.newValue);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   useEffect(() => {
     const worker = new Worker(
@@ -94,7 +144,8 @@ export default function App() {
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       const msg = event.data;
       if (msg.type === "progress") {
-        setStatus(msg.message);
+        const key = WORKER_PROGRESS_KEYS[msg.message];
+        setStatus(key ? { key } : { raw: msg.message });
       } else if (msg.type === "done") {
         const blob = new Blob([msg.giaBytes], {
           type: "application/octet-stream",
@@ -102,10 +153,10 @@ export default function App() {
         setDownloadBlob(blob);
         setDownloadName(msg.downloadName);
         setStats(msg.stats);
-        setStatus(`Done. ${msg.stats.shapeCount} shapes generated.`);
+        setStatus({ key: "statusDone", params: { count: msg.stats.shapeCount } });
         setBusy(false);
       } else if (msg.type === "error") {
-        setStatus(`Error: ${msg.error}`);
+        setStatus({ key: "statusError", params: { message: msg.error } });
         setBusy(false);
       }
     };
@@ -128,12 +179,17 @@ export default function App() {
   const canGenerate = !!file && !busy;
   const canDownload = !!downloadBlob && !busy;
 
+  const statusText = "raw" in status ? status.raw : t(status.key, status.params);
+
   const summary = useMemo(() => {
-    if (!stats) return "No export yet.";
-    return `${stats.width}×${stats.height} · ${stats.shapeCount} shapes · ${(
-      stats.elapsedMs / 1000
-    ).toFixed(2)}s`;
-  }, [stats]);
+    if (!stats) return t("noExport");
+    return t("summaryLine", {
+      width: stats.width,
+      height: stats.height,
+      count: stats.shapeCount,
+      seconds: (stats.elapsedMs / 1000).toFixed(2),
+    });
+  }, [stats, t]);
 
   const maxPreviewScale = useMemo(() => {
     return Math.max(
@@ -154,12 +210,17 @@ export default function App() {
     return 1 / Math.max(1, rotatedBoundsMultiplier);
   }, [config.imageRotation]);
 
+  function handleLangChange(code: Lang) {
+    setLang(code);
+    saveLang(code);
+  }
+
   async function handleGenerate() {
     if (!file || !workerRef.current) return;
     setBusy(true);
     setStats(null);
     setDownloadBlob(null);
-    setStatus("Reading PNG");
+    setStatus({ key: "statusReadingPng" });
 
     try {
       const imageData = await fileToImageData(file);
@@ -171,9 +232,12 @@ export default function App() {
       };
       workerRef.current.postMessage(payload);
     } catch (error) {
-      setStatus(
-        `Error: ${error instanceof Error ? error.message : String(error)}`
-      );
+      setStatus({
+        key: "statusError",
+        params: {
+          message: error instanceof Error ? error.message : String(error),
+        },
+      });
       setBusy(false);
     }
   }
@@ -203,12 +267,13 @@ export default function App() {
     if (nextFile) {
       const nextParentName = parentNameFromFile(nextFile);
       setConfig((prev) => ({ ...prev, parentName: nextParentName }));
-      setStatus(
-        `Loaded ${nextFile.name}. Parent name set to "${nextParentName}".`
-      );
+      setStatus({
+        key: "statusLoaded",
+        params: { file: nextFile.name, name: nextParentName },
+      });
     } else {
       setConfig((prev) => ({ ...prev, parentName: DEFAULT_CONFIG.parentName }));
-      setStatus("Choose a PNG to begin.");
+      setStatus({ key: "statusChoosePng" });
     }
   }
 
@@ -230,18 +295,29 @@ export default function App() {
       <main className="app-card">
         <section className="left-pane">
           <div className="title-block">
-            <p className="eyebrow">GIA Pixel Builder</p>
+            <div className="title-row">
+              <p className="eyebrow">GIA Pixel Builder</p>
+              <select
+                className="lang-select"
+                aria-label={t("languageLabel")}
+                value={lang}
+                onChange={(e) => handleLangChange(e.target.value as Lang)}
+              >
+                {MILIASTRA_LANGS.map((code) => (
+                  <option key={code} value={code}>
+                    {LANG_NAMES[code]}
+                  </option>
+                ))}
+              </select>
+            </div>
             <h1>PNG → .gia</h1>
-            <p className="subtitle">
-              Browser converter for png to .gia. Large images may take a long
-              time to convert and lag the game upon import.
-            </p>
+            <p className="subtitle">{t("appSubtitle")}</p>
           </div>
 
-          <h2 className="section-title">Conversion</h2>
+          <h2 className="section-title">{t("sectionConversion")}</h2>
           <div className="control-grid">
             <label className="field field-file">
-              <span>Image</span>
+              <span>{t("fieldImage")}</span>
               <input
                 type="file"
                 accept="image/png"
@@ -250,21 +326,21 @@ export default function App() {
             </label>
 
             <label className="field">
-              <span>Optimization</span>
+              <span>{t("fieldOptimization")}</span>
               <select
                 value={config.optimization}
                 onChange={(e) =>
                   update("optimization", e.target.value as Optimization)
                 }
               >
-                <option value="exact">Exact</option>
-                <option value="fast-overdraw">Fast Overdraw</option>
-                <option value="safe-overdraw">Safe Overdraw</option>
+                <option value="exact">{t("optExact")}</option>
+                <option value="fast-overdraw">{t("optFastOverdraw")}</option>
+                <option value="safe-overdraw">{t("optSafeOverdraw")}</option>
               </select>
             </label>
 
             <label className="field">
-              <span>Pixel Size</span>
+              <span>{t("fieldPixelSize")}</span>
               <input
                 type="number"
                 min="0.01"
@@ -277,7 +353,7 @@ export default function App() {
             </label>
 
             <label className="field">
-              <span>Rotation</span>
+              <span>{t("fieldRotation")}</span>
               <input
                 type="number"
                 step="0.1"
@@ -289,14 +365,11 @@ export default function App() {
             </label>
           </div>
 
-          <h2 className="section-title">Device Scales</h2>
-          <div
-            className="scale-config-row"
-            aria-label="Device scale configurations"
-          >
-            {DEVICE_SCALE_FIELDS.map(({ key, label }) => (
+          <h2 className="section-title">{t("sectionDeviceScales")}</h2>
+          <div className="scale-config-row" aria-label={t("deviceScalesAria")}>
+            {DEVICE_SCALE_FIELDS.map(({ key, labelKey }) => (
               <label className="field scale-field" key={key}>
-                <span>{label} Scale</span>
+                <span>{t("deviceScaleLabel", { label: t(labelKey) })}</span>
                 <input
                   type="number"
                   min="0.01"
@@ -317,17 +390,17 @@ export default function App() {
               setAdvancedOpen((e.target as HTMLDetailsElement).open)
             }
           >
-            <summary>Advanced Settings</summary>
+            <summary>{t("advancedSettings")}</summary>
             <div className="control-grid advanced-grid">
               <label className="field">
-                <span>Parent Name</span>
+                <span>{t("fieldParentName")}</span>
                 <input
                   value={config.parentName}
                   onChange={(e) => update("parentName", e.target.value)}
                 />
               </label>
               <label className="field">
-                <span>Parent X</span>
+                <span>{t("fieldParentX")}</span>
                 <input
                   type="number"
                   value={config.parentX}
@@ -337,7 +410,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Parent Y</span>
+                <span>{t("fieldParentY")}</span>
                 <input
                   type="number"
                   value={config.parentY}
@@ -347,7 +420,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Field Scale</span>
+                <span>{t("fieldFieldScale")}</span>
                 <input
                   type="number"
                   step="0.01"
@@ -358,7 +431,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Layer Order</span>
+                <span>{t("fieldLayerOrder")}</span>
                 <select
                   value={config.exportLayerOrder}
                   onChange={(e) =>
@@ -368,12 +441,12 @@ export default function App() {
                     )
                   }
                 >
-                  <option value="front-to-back">Front to Back</option>
-                  <option value="back-to-front">Back to Front</option>
+                  <option value="front-to-back">{t("orderFrontToBack")}</option>
+                  <option value="back-to-front">{t("orderBackToFront")}</option>
                 </select>
               </label>
               <label className="field">
-                <span>Merge Passes</span>
+                <span>{t("fieldMergePasses")}</span>
                 <input
                   type="number"
                   min="0"
@@ -384,7 +457,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Max Overdraw Ratio</span>
+                <span>{t("fieldMaxOverdrawRatio")}</span>
                 <input
                   type="number"
                   min="1"
@@ -396,7 +469,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Safe Time Seconds</span>
+                <span>{t("fieldSafeTimeSeconds")}</span>
                 <input
                   type="number"
                   min="0.1"
@@ -408,7 +481,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Underpaint BBox Ratio</span>
+                <span>{t("fieldUnderpaintBBoxRatio")}</span>
                 <input
                   type="number"
                   min="1"
@@ -423,7 +496,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Underpaint Min Pixels</span>
+                <span>{t("fieldUnderpaintMinPixels")}</span>
                 <input
                   type="number"
                   min="1"
@@ -437,7 +510,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Underpaint Min Savings</span>
+                <span>{t("fieldUnderpaintMinSavings")}</span>
                 <input
                   type="number"
                   min="1"
@@ -451,7 +524,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Underpaint Beam Width</span>
+                <span>{t("fieldUnderpaintBeamWidth")}</span>
                 <input
                   type="number"
                   min="1"
@@ -465,7 +538,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Underpaint Beam Candidates</span>
+                <span>{t("fieldUnderpaintBeamCandidates")}</span>
                 <input
                   type="number"
                   min="1"
@@ -479,7 +552,7 @@ export default function App() {
                 />
               </label>
               <label className="field checkbox-field">
-                <span>Keep Parent Position</span>
+                <span>{t("fieldKeepParentPosition")}</span>
                 <input
                   type="checkbox"
                   checked={config.keepParentPosition}
@@ -489,7 +562,7 @@ export default function App() {
                 />
               </label>
               <label className="field checkbox-field">
-                <span>Y Down Coordinates</span>
+                <span>{t("fieldYDown")}</span>
                 <input
                   type="checkbox"
                   checked={config.yDown}
@@ -497,7 +570,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Stage 1 Passes</span>
+                <span>{t("fieldStage1Passes")}</span>
                 <input
                   type="number"
                   min="0"
@@ -508,7 +581,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Stage 1 Ratio</span>
+                <span>{t("fieldStage1Ratio")}</span>
                 <input
                   type="number"
                   min="1"
@@ -520,7 +593,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Stage 2 Passes</span>
+                <span>{t("fieldStage2Passes")}</span>
                 <input
                   type="number"
                   min="0"
@@ -531,7 +604,7 @@ export default function App() {
                 />
               </label>
               <label className="field">
-                <span>Stage 2 Ratio</span>
+                <span>{t("fieldStage2Ratio")}</span>
                 <input
                   type="number"
                   min="1"
@@ -551,24 +624,24 @@ export default function App() {
               disabled={!canGenerate}
               onClick={handleGenerate}
             >
-              {busy ? "Generating…" : "Generate .gia"}
+              {busy ? t("btnGenerating") : t("btnGenerate")}
             </button>
             <button
               className={`secondary-btn ${canDownload ? "" : "disabled"}`}
               disabled={!canDownload}
               onClick={handleDownload}
             >
-              Download .gia
+              {t("btnDownload")}
             </button>
           </div>
 
           <div className="status-panel">
             <div>
-              <span className="mini-label">Status</span>
-              <p>{status}</p>
+              <span className="mini-label">{t("labelStatus")}</span>
+              <p>{statusText}</p>
             </div>
             <div>
-              <span className="mini-label">Last Export</span>
+              <span className="mini-label">{t("labelLastExport")}</span>
               <p>{summary}</p>
             </div>
           </div>
@@ -577,7 +650,7 @@ export default function App() {
         <section className="right-pane">
           <div className="preview-frame preview-stack">
             {previewUrl ? (
-              DEVICE_SCALE_FIELDS.map(({ key, label }) => {
+              DEVICE_SCALE_FIELDS.map(({ key, labelKey }) => {
                 const scale = config.deviceScales[key];
                 // Keep the biggest preview under 100% so rotation has room and
                 // the image does not clip into the preview-card border.
@@ -594,16 +667,18 @@ export default function App() {
                 return (
                   <div className="scaled-preview" key={key}>
                     <div className="preview-label">
-                      <span>{label}</span>
+                      <span>{t(labelKey)}</span>
                       <strong>
-                        {(scale * previewPixelScale).toFixed(2)}× preview
+                        {t("previewScale", {
+                          value: (scale * previewPixelScale).toFixed(2),
+                        })}
                       </strong>
                     </div>
                     <div className="preview-image-row">
                       <div className="preview-transform-box">
                         <img
                           src={previewUrl}
-                          alt={`${label} scaled PNG preview`}
+                          alt={t("previewAlt", { label: t(labelKey) })}
                           style={{
                             width: relativeWidth,
                             transform: `rotate(${-config.imageRotation}deg)`,
@@ -615,7 +690,7 @@ export default function App() {
                 );
               })
             ) : (
-              <div className="empty-preview">PNG preview</div>
+              <div className="empty-preview">{t("previewEmpty")}</div>
             )}
           </div>
         </section>
