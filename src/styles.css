@@ -418,7 +418,7 @@ select option {
 /* ----- status panel ----- */
 .status-panel {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto;
   gap: 12px;
   padding: 12px 14px;
   border: 1px solid var(--line);
@@ -446,6 +446,113 @@ select option {
   color: var(--text);
   overflow-wrap: break-word;
   font-variant-numeric: tabular-nums;
+}
+
+.json-export-control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.json-export-control select,
+.json-export-control button,
+.json-export-actions button {
+  min-height: 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.json-export-control select {
+  min-width: 132px;
+  padding: 0 28px 0 10px;
+}
+
+.json-export-control button,
+.json-export-actions button {
+  padding: 0 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.json-export-control button {
+  border-color: var(--sky);
+  background: var(--sky);
+  color: #fff;
+}
+
+.json-export-control select:hover:not(:disabled),
+.json-export-actions button:hover {
+  border-color: var(--sky);
+}
+
+.json-export-control button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.json-export-control select:focus-visible,
+.json-export-control button:focus-visible,
+.json-export-actions button:focus-visible,
+.json-export-panel textarea:focus-visible {
+  outline: 2px solid var(--sky);
+  outline-offset: 2px;
+}
+
+.json-export-control select:disabled,
+.json-export-control button:disabled {
+  border-color: var(--line);
+  background: var(--line);
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+.json-export-panel {
+  display: grid;
+  gap: 10px;
+  min-height: 220px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+
+.json-export-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.json-export-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.json-export-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.json-export-panel textarea {
+  width: 100%;
+  min-height: 170px;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--inset);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
 }
 
 /* ----- preview column ----- */
@@ -601,6 +708,20 @@ select option {
 
   .status-panel {
     grid-template-columns: 1fr;
+  }
+
+  .json-export-control {
+    justify-content: stretch;
+  }
+
+  .json-export-control select,
+  .json-export-control button {
+    flex: 1;
+  }
+
+  .json-export-heading {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .cta-row {

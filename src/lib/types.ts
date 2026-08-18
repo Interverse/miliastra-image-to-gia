@@ -50,3 +50,5 @@ export interface GenerationStats {
   optimization: Optimization
   elapsedMs: number
 }
+
+export type JsonExportMode = 'raw' | 'normalized'

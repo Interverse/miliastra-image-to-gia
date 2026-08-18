@@ -293,7 +293,7 @@ export async function buildGiaFromRects(
   imgHeight: number,
   config: GeneratorConfig,
   types: GiaTypes,
-  outputName = 'output.gia'
+  outputName = 'output.gia',
 ): Promise<Uint8Array> {
   const payload = bytesToPayload(templateGiaBytes)
   const bundleMessage = types.AssetBundle.decode(payload)
@@ -319,8 +319,12 @@ export async function buildGiaFromRects(
     bundle.dependencies = bundle.dependencies.slice(0, rects.length)
   }
 
-  let maxGuid = Math.max(parentGuid, ...bundle.dependencies.map((d: any) => getGuid(d)))
-  let maxUiId = Math.max(0, ...bundle.dependencies.map((d: any) => getHiddenUiId(d) ?? 0))
+  let maxGuid = parentGuid
+  let maxUiId = 0
+  for (const dependency of bundle.dependencies) {
+    maxGuid = Math.max(maxGuid, getGuid(dependency))
+    maxUiId = Math.max(maxUiId, getHiddenUiId(dependency) ?? 0)
+  }
   let cloneSourceIndex = 0
 
   while (bundle.dependencies.length < rects.length) {
@@ -363,7 +367,11 @@ export async function buildGiaFromRects(
 
   bundle.internal_name = bundle.internal_name ?? config.parentName
   rebuildParentRefs(parent, bundle.dependencies, types.ResourceLocator)
-  patchParentDescriptorNextId(parent, Math.max(parentGuid + 1, ...bundle.dependencies.map((d: any) => getGuid(d) + 1)))
+  let nextChildGuid = parentGuid + 1
+  for (const dependency of bundle.dependencies) {
+    nextChildGuid = Math.max(nextChildGuid, getGuid(dependency) + 1)
+  }
+  patchParentDescriptorNextId(parent, nextChildGuid)
 
   if (!config.keepParentPosition) {
     const bbox = rotatedBBoxSize(imgWidth * config.pixelSize, imgHeight * config.pixelSize, config.imageRotation)

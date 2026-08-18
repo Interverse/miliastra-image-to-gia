@@ -4,6 +4,7 @@ import type {
   GeneratorConfig,
   GenerationStats,
   Optimization,
+  JsonExportMode,
 } from "./lib/types";
 import {
   HTML_LANGS,
@@ -99,6 +100,17 @@ async function fileToImageData(file: File): Promise<ImageData> {
   }
 }
 
+function downloadFile(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
 export default function App() {
   const workerRef = useRef<Worker | null>(null);
   const [lang, setLang] = useState<Lang>(() => resolveLang());
@@ -111,6 +123,9 @@ export default function App() {
   const [downloadName, setDownloadName] = useState<string>("output.gia");
   const [stats, setStats] = useState<GenerationStats | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [jsonMode, setJsonMode] = useState<JsonExportMode>("raw");
+  const [lastJson, setLastJson] = useState<{ blob: Blob; name: string } | null>(null);
+
 
   const t = useMemo(
     () =>
@@ -147,7 +162,7 @@ export default function App() {
       if (msg.type === "progress") {
         const key = WORKER_PROGRESS_KEYS[msg.message];
         setStatus(key ? { key } : { raw: msg.message });
-      } else if (msg.type === "done") {
+      } else if (msg.type === "gia-done") {
         const blob = new Blob([msg.giaBytes], {
           type: "application/octet-stream",
         });
@@ -155,6 +170,15 @@ export default function App() {
         setDownloadName(msg.downloadName);
         setStats(msg.stats);
         setStatus({ key: "statusDone", params: { count: msg.stats.shapeCount } });
+        setBusy(false);
+      } else if (msg.type === "json-done") {
+        const blob = new Blob([msg.json], { type: "application/json" });
+        setLastJson({ blob, name: msg.downloadName });
+        setStats(msg.stats);
+        downloadFile(blob, msg.downloadName);
+        setStatus({
+          raw: `Done. ${msg.stats.shapeCount} shapes generated; JSON downloaded.`,
+        });
         setBusy(false);
       } else if (msg.type === "error") {
         setStatus({ key: "statusError", params: { message: msg.error } });
@@ -182,6 +206,7 @@ export default function App() {
 
   const statusText = "raw" in status ? status.raw : t(status.key, status.params);
 
+  const canExportJson = !!file && !busy;
   const summary = useMemo(() => {
     if (!stats) return t("noExport");
     return t("summaryLine", {
@@ -230,6 +255,7 @@ export default function App() {
         config,
         assetBase: new URL("./", window.location.href).href,
         fileName: file.name,
+        output: "gia",
       };
       workerRef.current.postMessage(payload);
     } catch (error) {
@@ -264,6 +290,7 @@ export default function App() {
     setFile(nextFile);
     setDownloadBlob(null);
     setStats(null);
+    setLastJson(null);
 
     if (nextFile) {
       const nextParentName = parentNameFromFile(nextFile);
@@ -280,14 +307,42 @@ export default function App() {
 
   function handleDownload() {
     if (!downloadBlob) return;
-    const url = URL.createObjectURL(downloadBlob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = downloadName;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    downloadFile(downloadBlob, downloadName);
+  }
+
+  async function handleJsonExport() {
+    if (!file || !workerRef.current) return;
+    setBusy(true);
+    setStats(null);
+    setLastJson(null);
+    setStatus({ key: "statusReadingPng" });
+    try {
+      const imageData = await fileToImageData(file);
+      const payload: WorkerRequest = {
+        imageData,
+        config,
+        assetBase: new URL("./", window.location.href).href,
+        fileName: file.name,
+        output: "json",
+        jsonMode,
+      };
+      workerRef.current.postMessage(payload);
+    } catch (error) {
+      setStatus({
+        key: "statusError",
+        params: {
+          message: error instanceof Error ? error.message : String(error),
+        },
+      });
+      setBusy(false);
+    }
+  }
+
+  function handleViewJson() {
+    if (!lastJson) return;
+    const url = URL.createObjectURL(lastJson.blob);
+    window.open(url, "_blank", "noopener,noreferrer");
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
 
   return (
@@ -644,6 +699,31 @@ export default function App() {
             <div>
               <span className="mini-label">{t("labelLastExport")}</span>
               <p>{summary}</p>
+            </div>
+            <div className="json-export-control">
+              <select
+                aria-label="JSON export format"
+                value={jsonMode}
+                disabled={!file || busy}
+                onChange={(event) =>
+                  setJsonMode(event.target.value as JsonExportMode)
+                }
+              >
+                <option value="raw">Raw JSON</option>
+                <option value="normalized">Normalized JSON</option>
+              </select>
+              <button
+                className={`json-export-btn ${canExportJson ? "" : "disabled"}`}
+                disabled={!canExportJson}
+                onClick={handleJsonExport}
+              >
+                Generate & Download JSON
+              </button>
+              {lastJson && !busy && (
+                <button type="button" onClick={handleViewJson}>
+                  View JSON
+                </button>
+              )}
             </div>
           </div>
         </section>

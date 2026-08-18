@@ -459,17 +459,22 @@ function fastMergeOverdrawFromSeed(
       continue;
 
     const candidateOrder = order.filter((rid) => rid !== i && rid !== j);
-    const intersections: number[] = [];
+    let insertAt = 0;
     for (let pos = 0; pos < candidateOrder.length; pos += 1) {
       const rid = candidateOrder[pos];
-      if (rectIntersectsBBox(rectsById.get(rid)!, bbox))
-        intersections.push(pos);
+      if (rectIntersectsBBox(rectsById.get(rid)!, bbox)) {
+        insertAt = pos;
+        break;
+      }
     }
-    const insertAt = intersections.length ? Math.min(...intersections) : 0;
     const mergedId = nextId;
     rectsById.set(mergedId, merged);
     candidateOrder.splice(insertAt, 0, mergedId);
-    const candidateRects = candidateOrder.map((rid) => rectsById.get(rid)!);
+    const candidateRects: RectPlan[] = [];
+    for (const rid of candidateOrder) {
+      const rect = rectsById.get(rid)!;
+      if (rectIntersectsBBox(rect, bbox)) candidateRects.push(rect);
+    }
     if (!candidatePreservesBBox(candidateRects, grid, bbox)) {
       rectsById.delete(mergedId);
       continue;
@@ -729,14 +734,17 @@ function assembleUnderpaintSolution(
       h: c.bbox.y1 - c.bbox.y0,
       color: c.color,
     });
-  for (const c of accepted)
-    rects.push(...offsetRects(c.corrections, c.bbox.x0, c.bbox.y0));
+  for (const c of accepted) {
+    const corrections = offsetRects(c.corrections, c.bbox.x0, c.bbox.y0);
+    for (const correction of corrections) rects.push(correction);
+  }
 
   const residual = makeGrid(grid.width, grid.height);
   for (let y = 0; y < grid.height; y += 1)
     for (let x = 0; x < grid.width; x += 1)
       if (!occupied[y][x]) residual.rows[y][x] = grid.rows[y][x];
-  rects.push(...greedyMeshingRects(residual).rects);
+  const residualRects = greedyMeshingRects(residual).rects;
+  for (const rect of residualRects) rects.push(rect);
   return { rects, width: grid.width, height: grid.height };
 }
 
@@ -921,44 +929,67 @@ function orderRectsBackToFront(
   rects: RectPlan[],
   grid: Grid
 ): RectPlan[] | null {
-  const remaining = rects.map((_, i) => i);
+  const pixelCount = grid.width * grid.height;
+  const blockedByPixel = new Array<number[] | undefined>(pixelCount);
+  const blockersRemaining = new Uint32Array(rects.length);
   const frontCovered = Array.from(
     { length: grid.height },
     () => new Uint8Array(grid.width)
   );
+  const selected = new Uint8Array(rects.length);
   const frontToBack: RectPlan[] = [];
 
-  function canBeNextFront(rect: RectPlan) {
+  // A rectangle is ready when every pixel where it differs from the target
+  // has already been covered by a rectangle placed in front of it. Index the
+  // inverse relationship once instead of rescanning and sorting all remaining
+  // rectangles after every selection.
+  for (let index = 0; index < rects.length; index += 1) {
+    const rect = rects[index];
+    for (let y = rect.y; y < rect.y + rect.h; y += 1) {
+      for (let x = rect.x; x < rect.x + rect.w; x += 1) {
+        if (grid.rows[y][x] === rect.color) continue;
+        blockersRemaining[index] += 1;
+        const pixel = y * grid.width + x;
+        const blocked = blockedByPixel[pixel];
+        if (blocked) blocked.push(index);
+        else blockedByPixel[pixel] = [index];
+      }
+    }
+  }
+
+  const ready = new MinHeap<number>((a, b) => {
+    const areaA = rectArea(rects[a]);
+    const areaB = rectArea(rects[b]);
+    return areaA !== areaB ? areaA < areaB : a < b;
+  });
+  for (let index = 0; index < rects.length; index += 1) {
+    if (blockersRemaining[index] === 0) ready.push(index);
+  }
+
+  while (ready.length) {
+    const index = ready.pop()!;
+    if (selected[index] || blockersRemaining[index] !== 0) continue;
+    selected[index] = 1;
+    const rect = rects[index];
+    frontToBack.push(rect);
+
     for (let y = rect.y; y < rect.y + rect.h; y += 1) {
       for (let x = rect.x; x < rect.x + rect.w; x += 1) {
         if (frontCovered[y][x]) continue;
-        if (grid.rows[y][x] !== rect.color) return false;
+        frontCovered[y][x] = 1;
+        const blocked = blockedByPixel[y * grid.width + x];
+        if (!blocked) continue;
+        for (const blockedIndex of blocked) {
+          if (selected[blockedIndex] || blockersRemaining[blockedIndex] === 0)
+            continue;
+          blockersRemaining[blockedIndex] -= 1;
+          if (blockersRemaining[blockedIndex] === 0) ready.push(blockedIndex);
+        }
       }
     }
-    return true;
-  }
-  function markFront(rect: RectPlan) {
-    for (let y = rect.y; y < rect.y + rect.h; y += 1)
-      for (let x = rect.x; x < rect.x + rect.w; x += 1) frontCovered[y][x] = 1;
   }
 
-  while (remaining.length) {
-    let pickedPos = -1;
-    remaining
-      .map((idx, pos) => ({ idx, pos, area: rectArea(rects[idx]) }))
-      .sort((a, b) => a.area - b.area || a.idx - b.idx)
-      .some(({ idx, pos }) => {
-        if (canBeNextFront(rects[idx])) {
-          pickedPos = pos;
-          return true;
-        }
-        return false;
-      });
-    if (pickedPos < 0) return null;
-    const [idx] = remaining.splice(pickedPos, 1);
-    frontToBack.push(rects[idx]);
-    markFront(rects[idx]);
-  }
+  if (frontToBack.length !== rects.length) return null;
   return frontToBack.reverse();
 }
 
@@ -990,8 +1021,9 @@ export function optimizeImage(
 ): RectPlan[] {
   const grid = buildGrid(imageData);
   let result: RectPlanResult;
+  let isExactCover = config.optimization === "exact";
 
-  if (config.optimization === "exact") {
+  if (isExactCover) {
     progress?.("optimization: exact");
     result = exactNonoverlapRects(grid, progress);
   } else if (config.optimization === "fast-overdraw") {
@@ -1007,14 +1039,19 @@ export function optimizeImage(
     result = bestFastRects(grid, config, progress);
   }
 
-  let orderedBackToFront = orderRectsBackToFront(result.rects, grid);
+  // Exact-cover rectangles never overlap, so any layer order is valid. Avoid
+  // the general overlap sorter, which is quadratic for pixel-per-rect images.
+  let orderedBackToFront = isExactCover
+    ? result.rects.slice()
+    : orderRectsBackToFront(result.rects, grid);
   if (
     !orderedBackToFront ||
     !rectOrderMatchesTarget(orderedBackToFront, grid)
   ) {
     progress?.("layer-order invalid; falling back to exact cover");
     result = exactNonoverlapRects(grid, progress);
-    orderedBackToFront = orderRectsBackToFront(result.rects, grid);
+    isExactCover = true;
+    orderedBackToFront = result.rects.slice();
   }
   if (!orderedBackToFront)
     throw new Error("Could not produce a valid rectangle plan");
