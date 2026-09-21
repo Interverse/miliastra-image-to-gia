@@ -63,7 +63,8 @@ const DEVICE_SCALE_FIELDS: Array<{ key: DeviceScaleKey; labelKey: MessageKey }> 
 const WORKER_PROGRESS_KEYS: Record<string, MessageKey> = {
   "Loading schema and template": "statusLoadingSchema",
   "Optimizing rectangles": "statusOptimizing",
-  "Encoding .gia file": "statusEncoding",
+  "Image elements to encode": "statusElementCount",
+  "Encoding image elements": "statusEncodingProgress",
 };
 
 // Status is stored as a key + params (or a raw string) so it re-renders in
@@ -161,12 +162,9 @@ export default function App() {
       const msg = event.data;
       if (msg.type === "progress") {
         const key = WORKER_PROGRESS_KEYS[msg.message];
-        setStatus(key ? { key } : { raw: msg.message });
+        setStatus(key ? { key, params: msg.params } : { raw: msg.message });
       } else if (msg.type === "gia-done") {
-        const blob = new Blob([msg.giaBytes], {
-          type: "application/octet-stream",
-        });
-        setDownloadBlob(blob);
+        setDownloadBlob(msg.giaBlob);
         setDownloadName(msg.downloadName);
         setStats(msg.stats);
         setStatus({ key: "statusDone", params: { count: msg.stats.shapeCount } });

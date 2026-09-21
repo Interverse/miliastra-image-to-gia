@@ -1,4 +1,4 @@
-import type protobuf from 'protobufjs'
+import protobuf from 'protobufjs'
 import { rotatedBBoxSize, rotatePoint } from './utils'
 import type { DeviceScales, GeneratorConfig, RectPlan } from './types'
 
@@ -25,17 +25,18 @@ function bytesToPayload(bytes: Uint8Array): Uint8Array {
   return bytes.slice(20, bytes.length - 4)
 }
 
-function withGiaHeader(payload: Uint8Array): Uint8Array {
-  const out = new Uint8Array(20 + payload.length + 4)
-  const view = new DataView(out.buffer)
-  view.setUint32(0, 20 + payload.length, false)
-  view.setUint32(4, 1, false)
-  view.setUint32(8, 0x0326, false)
-  view.setUint32(12, 3, false)
-  view.setUint32(16, payload.length, false)
-  out.set(payload, 20)
-  view.setUint32(20 + payload.length, 0x0679, false)
-  return out
+function withGiaHeader(payloadParts: Uint8Array[]): Blob {
+  let payloadLength = 0
+  for (const part of payloadParts) payloadLength += part.length
+  const header = new DataView(new ArrayBuffer(20))
+  header.setUint32(0, 20 + payloadLength, false)
+  header.setUint32(4, 1, false)
+  header.setUint32(8, 0x0326, false)
+  header.setUint32(12, 3, false)
+  header.setUint32(16, payloadLength, false)
+  const footer = new DataView(new ArrayBuffer(4))
+  footer.setUint32(0, 0x0679, false)
+  return new Blob([header.buffer, ...(payloadParts as BlobPart[]), footer.buffer], { type: 'application/octet-stream' })
 }
 
 function encodeVarint(value: number): Uint8Array {
@@ -266,16 +267,20 @@ function cloneChild(templateChild: any, newGuid: number, parentGuid: number): an
   return child
 }
 
-function rebuildParentRefs(parent: any, deps: any[], ResourceLocator: protobuf.Type) {
+function rebuildParentRefs(parent: any, templates: any[], guids: number[]) {
   if (!parent.ui?.object) throw new Error('Parent missing UI object')
-  parent.reference_list = []
-  parent.ui.object.child_guids = []
-  for (const dep of deps) {
-    const guid = getGuid(dep)
-    parent.ui.object.child_guids.push(guid)
-    const refObj = ResourceLocator.fromObject(dep.identity ?? {})
-    parent.reference_list.push(refObj)
+  parent.reference_list = new Array(guids.length)
+  parent.ui.object.child_guids = guids
+  for (let idx = 0; idx < guids.length; idx += 1) {
+    const source = templateForIndex(templates, idx)
+    parent.reference_list[idx] = { ...(source.identity ?? {}), asset_guid: guids[idx] }
   }
+}
+
+// The first template children are reused as-is; every further child is cloned
+// from the templates in rotation.
+function templateForIndex(templates: any[], idx: number): any {
+  return idx < templates.length ? templates[idx] : templates[(idx - templates.length) % templates.length]
 }
 
 function patchParentDescriptorNextId(parent: any, nextChildGuid: number) {
@@ -286,6 +291,11 @@ function patchParentDescriptorNextId(parent: any, nextChildGuid: number) {
   }
 }
 
+// Children are encoded in batches straight to bytes instead of materialising
+// the whole bundle as one object graph, which runs out of memory on images
+// with hundreds of thousands of rectangles.
+const ENCODE_BATCH_SIZE = 1000
+
 export async function buildGiaFromRects(
   templateGiaBytes: Uint8Array,
   rects: RectPlan[],
@@ -294,7 +304,8 @@ export async function buildGiaFromRects(
   config: GeneratorConfig,
   types: GiaTypes,
   outputName = 'output.gia',
-): Promise<Uint8Array> {
+  onProgress?: (encoded: number, total: number) => void,
+): Promise<Blob> {
   const payload = bytesToPayload(templateGiaBytes)
   const bundleMessage = types.AssetBundle.decode(payload)
   const bundle = types.AssetBundle.toObject(bundleMessage, {
@@ -311,35 +322,56 @@ export async function buildGiaFromRects(
 
   setParentName(parent, config.parentName)
 
-  const existing = [...(bundle.dependencies ?? [])]
-  if (existing.length === 0) throw new Error('Template has no child dependencies')
-
-  bundle.dependencies = bundle.dependencies ?? []
-  if (bundle.dependencies.length > rects.length) {
-    bundle.dependencies = bundle.dependencies.slice(0, rects.length)
-  }
+  const templates: any[] = bundle.dependencies ?? []
+  if (templates.length === 0) throw new Error('Template has no child dependencies')
 
   let maxGuid = parentGuid
   let maxUiId = 0
-  for (const dependency of bundle.dependencies) {
-    maxGuid = Math.max(maxGuid, getGuid(dependency))
-    maxUiId = Math.max(maxUiId, getHiddenUiId(dependency) ?? 0)
+  for (const template of templates.slice(0, rects.length)) {
+    maxGuid = Math.max(maxGuid, getGuid(template))
+    maxUiId = Math.max(maxUiId, getHiddenUiId(template) ?? 0)
   }
-  let cloneSourceIndex = 0
+  const firstCloneUiId = maxUiId + 1
 
-  while (bundle.dependencies.length < rects.length) {
-    maxGuid += 1
-    maxUiId += 1
-    const source = existing[cloneSourceIndex % existing.length]
-    cloneSourceIndex += 1
-    const child = cloneChild(source, maxGuid, parentGuid)
-    setUniqueUiIdentityAndName(child, maxUiId, `Rect ${bundle.dependencies.length + 1}`)
-    bundle.dependencies.push(child)
+  const guids = new Array<number>(rects.length)
+  for (let idx = 0; idx < rects.length; idx += 1) {
+    if (idx < templates.length) guids[idx] = getGuid(templates[idx])
+    else {
+      maxGuid += 1
+      guids[idx] = maxGuid
+    }
   }
+
+  rebuildParentRefs(parent, templates, guids)
+  let nextChildGuid = parentGuid + 1
+  for (const guid of guids) nextChildGuid = Math.max(nextChildGuid, guid + 1)
+  patchParentDescriptorNextId(parent, nextChildGuid)
+
+  if (!config.keepParentPosition) {
+    const bbox = rotatedBBoxSize(imgWidth * config.pixelSize, imgHeight * config.pixelSize, config.imageRotation)
+    setParentTransform(parent, config.parentX, config.parentY, bbox.width * config.fieldScale, bbox.height * config.fieldScale, config.deviceScales)
+  }
+
+  const verifiedParent = types.ResourceEntry.verify(parent)
+  if (verifiedParent) throw new Error(`Bundle verify failed: ${verifiedParent}`)
+
+  const parts: Uint8Array[] = []
+  let writer = protobuf.Writer.create()
+  const flush = () => {
+    parts.push(writer.finish())
+    writer = protobuf.Writer.create()
+  }
+
+  // AssetBundle.primary_resource = 1
+  types.ResourceEntry.encode(types.ResourceEntry.fromObject(parent), writer.uint32((1 << 3) | 2).fork()).ldelim()
+  flush()
 
   for (let idx = 0; idx < rects.length; idx += 1) {
-    const dep = bundle.dependencies[idx]
     const rect = rects[idx]
+    const dep =
+      idx < templates.length
+        ? templates[idx]
+        : cloneChild(templateForIndex(templates, idx), guids[idx], parentGuid)
 
     const visibleWidth = rect.w * config.pixelSize
     const visibleHeight = rect.h * config.pixelSize
@@ -356,34 +388,27 @@ export async function buildGiaFromRects(
     const centerY = rotated.y * config.fieldScale
 
     const label = `Rect ${idx + 1}`
-    let uiId = getHiddenUiId(dep)
-    if (uiId == null) {
-      maxUiId += 1
-      uiId = maxUiId
+    if (idx >= templates.length) {
+      setUniqueUiIdentityAndName(dep, firstCloneUiId + (idx - templates.length), label)
     }
-    setUniqueUiIdentityAndName(dep, uiId, label)
     setSquareValues(dep, label, centerX, centerY, width, height, rect.color, config.imageRotation, config.deviceScales)
+
+    const verified = types.ResourceEntry.verify(dep)
+    if (verified) throw new Error(`Bundle verify failed: ${verified}`)
+
+    // AssetBundle.dependencies = 2
+    types.ResourceEntry.encode(types.ResourceEntry.fromObject(dep), writer.uint32((2 << 3) | 2).fork()).ldelim()
+
+    if ((idx + 1) % ENCODE_BATCH_SIZE === 0) {
+      flush()
+      onProgress?.(idx + 1, rects.length)
+    }
   }
 
-  bundle.internal_name = bundle.internal_name ?? config.parentName
-  rebuildParentRefs(parent, bundle.dependencies, types.ResourceLocator)
-  let nextChildGuid = parentGuid + 1
-  for (const dependency of bundle.dependencies) {
-    nextChildGuid = Math.max(nextChildGuid, getGuid(dependency) + 1)
-  }
-  patchParentDescriptorNextId(parent, nextChildGuid)
+  // AssetBundle.export_tag = 3, AssetBundle.engine_version = 5
+  writer.uint32((3 << 3) | 2).string(`600489258-0-${parentGuid}-\\${outputName}`)
+  writer.uint32((5 << 3) | 2).string(bundle.engine_version || '6.6.0')
+  flush()
 
-  if (!config.keepParentPosition) {
-    const bbox = rotatedBBoxSize(imgWidth * config.pixelSize, imgHeight * config.pixelSize, config.imageRotation)
-    setParentTransform(parent, config.parentX, config.parentY, bbox.width * config.fieldScale, bbox.height * config.fieldScale, config.deviceScales)
-  }
-
-  bundle.export_tag = `600489258-0-${parentGuid}-\\${outputName}`
-  if (!bundle.engine_version) bundle.engine_version = '6.6.0'
-
-  const verified = types.AssetBundle.verify(bundle)
-  if (verified) throw new Error(`Bundle verify failed: ${verified}`)
-
-  const encoded = types.AssetBundle.encode(types.AssetBundle.fromObject(bundle)).finish() as Uint8Array
-  return withGiaHeader(encoded)
+  return withGiaHeader(parts)
 }

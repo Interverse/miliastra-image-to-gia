@@ -15,10 +15,10 @@ export interface WorkerRequest {
 }
 
 export type WorkerResponse =
-  | { type: 'progress'; message: string }
+  | { type: 'progress'; message: string; params?: Record<string, string | number> }
   | {
       type: 'gia-done'
-      giaBytes: ArrayBuffer
+      giaBlob: Blob
       downloadName: string
       stats: GenerationStats
     }
@@ -37,12 +37,12 @@ ctx.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     const started = performance.now()
     const { imageData, config, assetBase, fileName, output, jsonMode = 'raw' } = event.data
 
-    const send = (message: string) => {
-      ctx.postMessage({ type: 'progress', message } satisfies WorkerResponse)
+    const send = (message: string, params?: Record<string, string | number>) => {
+      ctx.postMessage({ type: 'progress', message, params } satisfies WorkerResponse)
     }
 
     send('Optimizing rectangles')
-    const rects = optimizeImage(imageData, config, send)
+    const rects = optimizeImage(imageData, config, (message) => send(message))
     const baseName = fileName.replace(/\.[^.]+$/, '') || 'image'
     const stats = (): GenerationStats => ({
       width: imageData.width,
@@ -72,9 +72,9 @@ ctx.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       }),
     ])
 
-    send('Encoding .gia file')
+    send('Image elements to encode', { count: rects.length })
     const outputName = `${baseName}.gia`
-    const giaBytes = await buildGiaFromRects(
+    const giaBlob = await buildGiaFromRects(
       templateGia,
       rects,
       imageData.width,
@@ -82,14 +82,15 @@ ctx.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       config,
       types,
       outputName,
+      (done, total) => send('Encoding image elements', { done, total }),
     )
 
     ctx.postMessage({
       type: 'gia-done',
-      giaBytes: giaBytes.buffer as ArrayBuffer,
+      giaBlob,
       downloadName: outputName,
       stats: stats(),
-    } satisfies WorkerResponse, [giaBytes.buffer])
+    } satisfies WorkerResponse)
   } catch (error) {
     ctx.postMessage({
       type: 'error',
