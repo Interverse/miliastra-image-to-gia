@@ -1,36 +1,80 @@
-// Regression tests against the supplied Client Control Template reference.
+// Regression tests against the supplied Client Control Template references.
 //
-// `public/client-template.gia` is the file the user provided verbatim. It is
+// `public/client-template.gia` is `Image with Mask Off.gia` verbatim: a
+// container that is itself an image, with the in-game mask toggle off. It is
 // both the structural template the exporter generates from and the permanent
 // fixture these tests read, so the two can never drift apart.
+//
+// Two earlier exports are kept beside it as evidence:
+//   tests/fixtures/client-image-container.gia — the original plain container,
+//     which is where the Square/Circle +100 X anchor was established
+//   tests/fixtures/client-image-mask-on.gia — the same image container with
+//     the mask toggle on, which is what pins down where the toggle lives
 
 import { describe, expect, it } from 'vitest'
 import {
+  CLIENT_CONTAINER_COLOR_ARGB,
   CLIENT_CONTAINER_RESOURCE_CLASS,
+  CLIENT_TEMPLATE_CONTAINER_NAMES,
   IMAGE_RESOURCE_IDS,
   UI_CONTROL_RESOURCE_CLASS,
   bytesToPayload,
 } from '../src/lib/giaCommon'
-import {
-  CLIENT_TEMPLATE_CONTAINER_NAME,
-  parseClientTemplate,
-  serializeClientGia,
-} from '../src/lib/giaClient'
+import { parseClientTemplate, serializeClientGia } from '../src/lib/giaClient'
 import { inspectGia, validateClientGia } from '../src/lib/giaInspect'
 import type { ImagePlan, PlannedShape } from '../src/lib/imagePlan'
 import * as pb from '../src/lib/pbraw'
-import { blobBytes, clientTemplateBytes } from './helpers'
+import { blobBytes, clientTemplateBytes, maskOnReferenceBytes, plainContainerReferenceBytes } from './helpers'
 
 const CIRCLE_X_OFFSET = 100
+const TEMPLATE_CONTAINER_NAME = 'Image With Mask Off'
 
 function reference() {
   return inspectGia(clientTemplateBytes())
 }
 
-function childNamed(name: string) {
-  const found = reference().children.find((child) => child.name === name)
+function childNamed(bundle: ReturnType<typeof inspectGia>, name: string) {
+  const found = bundle.children.find((child) => child.name === name)
   if (!found) throw new Error(`reference has no child named ${name}`)
   return found
+}
+
+/** Structural signature of a record: field numbers and wire types, nested. */
+function shapeOf(record: pb.PbMessage): string {
+  const describe = (node: pb.PbMessage, depth: number): string =>
+    node.fields
+      .map((field) => {
+        if (field.wire !== pb.WIRE_LENGTH) return `${field.no}:${field.wire}`
+        if (depth > 8) return `${field.no}:2`
+        let parsed: pb.PbMessage
+        try {
+          parsed = pb.parseMessage(field.bytes ?? new Uint8Array(0))
+        } catch {
+          return `${field.no}:2`
+        }
+        if (!parsed.fields.length) return `${field.no}:2`
+        const encoded = pb.serializeMessage({ fields: parsed.fields })
+        const original = field.bytes ?? new Uint8Array(0)
+        if (encoded.length !== original.length || !encoded.every((b, i) => b === original[i])) return `${field.no}:2`
+        return `${field.no}:2{${describe(pb.asMessage(field), depth + 1)}}`
+      })
+      .join(',')
+  return describe(record, 0)
+}
+
+/** Walks to the container's UiObject of any `.gia`. */
+function containerUiObject(bytes: Uint8Array): pb.PbMessage {
+  const bundle = pb.parseMessage(bytesToPayload(bytes))
+  const primary = pb.asMessage(pb.field(bundle, 1)!)
+  return pb.child(primary, 19, 1)!
+}
+
+function containerProperty(bytes: Uint8Array, id: number, type: number): pb.PbMessage {
+  for (const property of pb.fields(containerUiObject(bytes), 505)) {
+    const message = pb.asMessage(property)
+    if (pb.numberOf(message, 501) === id && pb.numberOf(message, 502) === type) return message
+  }
+  throw new Error(`container has no ${id}/${type} property`)
 }
 
 describe('lossless protobuf codec', () => {
@@ -78,30 +122,100 @@ describe('client reference structure', () => {
     const inspected = reference()
     expect(inspected.target).toBe('client')
     expect(inspected.container.resourceClass).toBe(CLIENT_CONTAINER_RESOURCE_CLASS)
-    expect(inspected.container.name).toBe(CLIENT_TEMPLATE_CONTAINER_NAME)
+    expect(inspected.container.name).toBe(TEMPLATE_CONTAINER_NAME)
     expect(inspected.children.map((child) => child.name).sort()).toEqual(['Circle', 'Square'])
     for (const child of inspected.children) {
       expect(child.resourceClass).toBe(UI_CONTROL_RESOURCE_CLASS)
       expect(child.parentGuid).toBe(inspected.container.guid)
     }
-    expect(inspected.container.childGuids.sort()).toEqual(
-      inspected.children.map((child) => child.guid).sort(),
-    )
-    expect(inspected.container.referenceGuids.sort()).toEqual(
+    expect([...inspected.container.childGuids].sort()).toEqual(inspected.children.map((child) => child.guid).sort())
+    expect([...inspected.container.referenceGuids].sort()).toEqual(
       inspected.children.map((child) => child.guid).sort(),
     )
   })
 
   it('uses the shared image resource IDs', () => {
-    expect(childNamed('Square').imageId).toBe(IMAGE_RESOURCE_IDS.square)
-    expect(childNamed('Circle').imageId).toBe(IMAGE_RESOURCE_IDS.circle)
-    expect(childNamed('Square').shape).toBe('square')
-    expect(childNamed('Circle').shape).toBe('circle')
+    const inspected = reference()
+    expect(childNamed(inspected, 'Square').imageId).toBe(IMAGE_RESOURCE_IDS.square)
+    expect(childNamed(inspected, 'Circle').imageId).toBe(IMAGE_RESOURCE_IDS.circle)
+    expect(childNamed(inspected, 'Square').shape).toBe('square')
+    expect(childNamed(inspected, 'Circle').shape).toBe('circle')
   })
 
+  it('has an image container rather than a plain container', () => {
+    const inspected = reference()
+    const before = inspectGia(plainContainerReferenceBytes())
+
+    // The image slots the plain container did not have…
+    expect(inspected.container.properties).toContain('73/96')
+    expect(inspected.container.properties).toContain('74/97')
+    expect(before.container.properties).not.toContain('73/96')
+    // …and not the slot it did have.
+    expect(inspected.container.properties).not.toContain('68/91')
+    expect(before.container.properties).toContain('68/91')
+    // The unexplained marker slots survive both ways.
+    expect(inspected.container.properties).toContain('63/83')
+    expect(inspected.container.properties).toContain('67/90')
+
+    expect(inspected.container.imageId).toBe(IMAGE_RESOURCE_IDS.square)
+    expect(inspected.container.colorArgb).toBe(CLIENT_CONTAINER_COLOR_ARGB)
+    expect((inspected.container.colorArgb ?? 0) >>> 24).toBe(0)
+    expect(inspected.container.maskEnabled).toBe(false)
+  })
+
+  it('switched the container transform discriminator from 25 to 23', () => {
+    const discriminator = (bytes: Uint8Array) =>
+      pb.numberOf(pb.child(containerProperty(bytes, 1, 12), 503, 13, 12)!, 502)
+    expect(discriminator(plainContainerReferenceBytes())).toBe(25)
+    expect(discriminator(clientTemplateBytes())).toBe(23)
+  })
+
+  it('has no server-only records and only fails validation on the placeholder name', () => {
+    const inspected = reference()
+    for (const child of inspected.children) {
+      expect(child.properties).toContain('73/96')
+      expect(child.properties).not.toContain('21/38')
+      expect(child.properties).not.toContain('4/23')
+    }
+    expect(inspected.container.properties).not.toContain('38/56')
+    expect(validateClientGia(inspected)).toEqual([
+      `container is still named the template placeholder "${TEMPLATE_CONTAINER_NAME}"`,
+    ])
+  })
+
+  it('has Square and Circle records that differ only in per-object values', () => {
+    const template = parseClientTemplate(clientTemplateBytes())
+    // If the two records differed structurally, one prototype would not be
+    // enough to emit both primitives.
+    expect(shapeOf(template.childrenByName.get('Circle')!)).toBe(shapeOf(template.childrenByName.get('Square')!))
+  })
+
+  it('leaves the child records structurally unchanged from the plain-container export', () => {
+    const now = parseClientTemplate(clientTemplateBytes())
+    const before = pb.parseMessage(bytesToPayload(plainContainerReferenceBytes()))
+    const beforeSquare = pb
+      .fields(before, 2)
+      .map((entry) => pb.asMessage(entry))
+      .find((record) => pb.stringOf(record, 3) === 'Square')!
+
+    // Swapping the container style must not disturb the children, which is
+    // what lets the child prototype stay exactly as it was. The two records
+    // differ only in GUIDs and transform values, neither of which shows up in
+    // a structural signature — except that the older export, whose Square sat
+    // at the origin, left the zero position out of the transform entirely.
+    expect(shapeOf(now.childrenByName.get('Square')!).split('504:2{501:5,502:5}').join('504:2')).toBe(
+      shapeOf(beforeSquare),
+    )
+  })
+})
+
+describe('the plain-container reference', () => {
   it('encodes the +100 X offset as the circle transform local position', () => {
-    const square = childNamed('Square')
-    const circle = childNamed('Circle')
+    // The original anchor, kept as a fixture: it is what established that a
+    // child's local position lives in transform field 504.
+    const inspected = inspectGia(plainContainerReferenceBytes())
+    const square = childNamed(inspected, 'Square')
+    const circle = childNamed(inspected, 'Circle')
     expect(square.transforms).toHaveLength(4)
     expect(circle.transforms).toHaveLength(4)
 
@@ -111,114 +225,80 @@ describe('client reference structure', () => {
       expect(square.transforms[i].y).toBeCloseTo(0, 3)
       expect(circle.transforms[i].y).toBeCloseTo(0, 3)
       expect(circle.transforms[i].x - square.transforms[i].x).toBeCloseTo(CIRCLE_X_OFFSET, 2)
-      // Both are 80x80 in the reference, so the offset is a position, not a
-      // size or a pivot difference.
+      // Both are 80x80 there, so the offset is a position, not a size or a
+      // pivot difference.
       expect(square.transforms[i].width).toBeCloseTo(80, 3)
       expect(circle.transforms[i].width).toBeCloseTo(80, 3)
     }
   })
 
-  it('has no server-only records and passes client validation', () => {
-    const inspected = reference()
-    for (const child of inspected.children) {
-      expect(child.properties).toContain('73/96')
-      expect(child.properties).not.toContain('21/38')
-      expect(child.properties).not.toContain('4/23')
-    }
-    expect(inspected.container.properties).not.toContain('38/56')
-    // The reference itself is only invalid on the placeholder name, which is
-    // exactly what generation has to replace.
-    expect(validateClientGia(inspected)).toEqual([
-      `container is still named the template placeholder "${CLIENT_TEMPLATE_CONTAINER_NAME}"`,
-    ])
+  it('is refused as a generation template because its container is not an image', () => {
+    expect(() => parseClientTemplate(plainContainerReferenceBytes())).toThrow(/image style/i)
+  })
+})
+
+describe('the in-game mask toggle', () => {
+  it('lives in the container image settings and is off in the shipped template', () => {
+    const maskOn = inspectGia(maskOnReferenceBytes())
+    const maskOff = reference()
+    expect(maskOn.container.maskEnabled).toBe(true)
+    expect(maskOff.container.maskEnabled).toBe(false)
+
+    // The two exports are otherwise the same container style.
+    expect(maskOn.container.properties).toEqual(maskOff.container.properties)
+    expect(maskOn.container.imageId).toBe(maskOff.container.imageId)
+    expect(maskOn.container.colorArgb).toBe(maskOff.container.colorArgb)
   })
 
-  it('has Square and Circle records that differ only in per-object values', () => {
-    const template = parseClientTemplate(clientTemplateBytes())
-    const square = template.childrenByName.get('Square')!
-    const circle = template.childrenByName.get('Circle')!
-
-    // If the two records differ structurally, one prototype would not be
-    // enough to emit both primitives.
-    const shapeOf = (record: pb.PbMessage): string => {
-      const describe = (node: pb.PbMessage, depth: number): string =>
-        node.fields
-          .map((field) => {
-            if (field.wire !== pb.WIRE_LENGTH) return `${field.no}:${field.wire}`
-            if (depth > 8) return `${field.no}:2`
-            let parsed: pb.PbMessage
-            try {
-              parsed = pb.parseMessage(field.bytes ?? new Uint8Array(0))
-            } catch {
-              return `${field.no}:2`
-            }
-            if (!parsed.fields.length) return `${field.no}:2`
-            const encoded = pb.serializeMessage({ fields: parsed.fields })
-            const original = field.bytes ?? new Uint8Array(0)
-            if (encoded.length !== original.length || !encoded.every((b, i) => b === original[i])) {
-              return `${field.no}:2`
-            }
-            return `${field.no}:2{${describe(pb.asMessage(field), depth + 1)}}`
-          })
-          .join(',')
-      return describe(record, 0)
-    }
-
-    // The only structural difference is the transform's position sub-message:
-    // Square writes it empty (0, 0) while Circle carries an explicit X. That
-    // is the +100 offset, and nothing else about the two records differs, so
-    // one prototype can emit either primitive.
-    const squareShape = shapeOf(square)
-    const circleShape = shapeOf(circle)
-    expect(circleShape).not.toBe(squareShape)
-    expect(circleShape.split('504:2{501:5}').length - 1).toBe(4)
-    expect(circleShape.split('504:2{501:5}').join('504:2')).toBe(squareShape)
+  it('is the only difference in the image settings payload', () => {
+    const settings = (bytes: Uint8Array) => pb.child(containerProperty(bytes, 74, 97), 503, 85)!
+    const on = settings(maskOnReferenceBytes())
+    const off = settings(clientTemplateBytes())
+    expect(pb.numberOf(on, 501)).toBe(1)
+    expect(pb.field(off, 501)).toBeUndefined()
+    // Everything except field 501 is identical, so the rest is inert data.
+    expect(shapeOf(on).replace('501:0,', '')).toBe(shapeOf(off))
   })
 })
 
 // A plan is the logical image representation both exporters consume, so a
-// hand-built one reproduces the reference layout exactly.
+// plan built straight from the decoded reference should regenerate it.
 function referenceShapedPlan(containerName: string): ImagePlan {
   const rootGuid = 1073742130
-  const shapes: Omit<PlannedShape, 'index' | 'guid' | 'uiId' | 'label'>[] = [
-    {
-      shape: 'circle',
-      imageId: IMAGE_RESOURCE_IDS.circle,
-      colorArgb: 0xffffffff,
-      x: CIRCLE_X_OFFSET,
-      y: 0,
-      width: 80,
-      height: 80,
-      rotationDegrees: 0,
-    },
-    {
-      shape: 'square',
-      imageId: IMAGE_RESOURCE_IDS.square,
-      colorArgb: 0xffffffff,
-      x: 0,
-      y: 0,
-      width: 80,
-      height: 80,
-      rotationDegrees: 0,
-    },
-  ]
+  const original = reference()
+  // The reference is an 80x80 container with Square flush to its top left and
+  // Circle hanging out past the bottom right, listed Circle first.
+  const shapes: Omit<PlannedShape, 'index' | 'guid' | 'uiId' | 'label'>[] = original.children.map((child) => {
+    const t = child.transforms[0]
+    return {
+      shape: child.shape ?? 'square',
+      imageId: child.imageId ?? IMAGE_RESOURCE_IDS.square,
+      colorArgb: (child.colorArgb ?? 0) >>> 0,
+      x: t.x,
+      y: t.y,
+      width: t.width,
+      height: t.height,
+      rotationDegrees: t.rotation,
+    }
+  })
+  const container = original.container.transforms[0]
   return {
     container: {
       guid: rootGuid,
       uiId: 1,
       name: containerName,
-      x: 0,
-      y: 0,
-      width: 150,
-      height: 150,
+      x: container.x,
+      y: container.y,
+      width: container.width,
+      height: container.height,
       applyTransform: true,
     },
     count: shapes.length,
     deviceScales: { desktop: 1, mobile: 1, controller: 1, mobileController: 1 },
-    sourceWidth: 2,
-    sourceHeight: 1,
-    // A Client hierarchy renders its first child first; the two shapes below
-    // do not overlap, so they are listed in the reference's own order.
+    sourceWidth: 80,
+    sourceHeight: 80,
+    // A Client hierarchy renders its first child first, and the plan keeps the
+    // reference's own child order.
     compositing: 'first-behind',
     guidAt: (index) => rootGuid + 1 + index,
     nextFreeGuid: () => rootGuid + 1 + shapes.length,
@@ -247,24 +327,32 @@ describe('generated client image vs the reference', () => {
 
     // The placeholder name is gone, replaced by the generated image name.
     expect(generated.container.name).toBe('Mario')
-    expect(generated.container.name).not.toBe(CLIENT_TEMPLATE_CONTAINER_NAME)
+    expect(CLIENT_TEMPLATE_CONTAINER_NAMES).not.toContain(generated.container.name)
+
+    // The container is still an image, with the same slots and settings.
+    expect(generated.container.properties).toEqual(original.container.properties)
+    expect(generated.container.descriptors).toEqual(original.container.descriptors)
+    expect(generated.container.imageId).toBe(IMAGE_RESOURCE_IDS.square)
+    expect(generated.container.colorArgb).toBe(CLIENT_CONTAINER_COLOR_ARGB)
+    expect(generated.container.maskEnabled).toBe(false)
+    for (const t of generated.container.transforms) {
+      expect(t.width).toBeCloseTo(80, 3)
+      expect(t.height).toBeCloseTo(80, 3)
+      expect(t.x).toBeCloseTo(0, 3)
+      expect(t.y).toBeCloseTo(0, 3)
+    }
 
     expect(generated.children).toHaveLength(2)
     expect(generated.children.map((child) => child.resourceClass)).toEqual(
       original.children.map((child) => child.resourceClass),
     )
-    // Reference dependency order is [Circle, Square]; the plan matches it.
-    expect(generated.children.map((child) => child.imageId)).toEqual(
-      original.children.map((child) => child.imageId),
-    )
+    expect(generated.children.map((child) => child.imageId)).toEqual(original.children.map((child) => child.imageId))
     expect(generated.children.map((child) => child.colorArgb)).toEqual(
       original.children.map((child) => child.colorArgb),
     )
     expect(generated.children.map((child) => child.properties)).toEqual(
       original.children.map((child) => child.properties),
     )
-    expect(generated.container.properties).toEqual(original.container.properties)
-    expect(generated.container.descriptors).toEqual(original.container.descriptors)
 
     for (let i = 0; i < 2; i += 1) {
       for (let t = 0; t < 4; t += 1) {
@@ -277,11 +365,6 @@ describe('generated client image vs the reference', () => {
       }
     }
 
-    // The known anchor survives regeneration.
-    const circle = generated.children.find((child) => child.shape === 'circle')!
-    const square = generated.children.find((child) => child.shape === 'square')!
-    expect(circle.transforms[0].x - square.transforms[0].x).toBeCloseTo(CIRCLE_X_OFFSET, 3)
-
     // References stay internally consistent after renumbering.
     expect(generated.container.childGuids).toEqual(generated.children.map((child) => child.guid))
     expect(generated.container.referenceGuids).toEqual(generated.children.map((child) => child.guid))
@@ -289,10 +372,9 @@ describe('generated client image vs the reference', () => {
     expect(new Set(generated.children.map((child) => child.uiId)).size).toBe(2)
   })
 
-  it('refuses to emit the placeholder container name', () => {
-    expect(() => serializeClientGia(referenceShapedPlan(CLIENT_TEMPLATE_CONTAINER_NAME), clientTemplateBytes())).toThrow(
-      /placeholder/i,
-    )
-  })
-
+  for (const placeholder of CLIENT_TEMPLATE_CONTAINER_NAMES) {
+    it(`refuses to emit the placeholder container name "${placeholder}"`, () => {
+      expect(() => serializeClientGia(referenceShapedPlan(placeholder), clientTemplateBytes())).toThrow(/placeholder/i)
+    })
+  }
 })

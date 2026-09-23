@@ -11,7 +11,10 @@
 // assert on other than raw bytes.
 
 import {
+  CLIENT_CONTAINER_COLOR_ARGB,
   CLIENT_CONTAINER_RESOURCE_CLASS,
+  CLIENT_TEMPLATE_CONTAINER_NAMES,
+  IMAGE_RESOURCE_IDS,
   SERVER_CONTAINER_RESOURCE_CLASS,
   UI_CONTROL_RESOURCE_CLASS,
   bytesToPayload,
@@ -42,6 +45,8 @@ const F_PROP_TYPE = 502
 const F_BODY_TRANSFORM = 13
 const F_BODY_SERVER_SHAPE = 31
 const F_BODY_CLIENT_IMAGE = 84
+const F_BODY_CLIENT_IMAGE_SETTINGS = 85
+const F_IMAGE_MASK_ENABLED = 501
 const F_SERVER_SHAPE_TYPE = 2
 const F_SERVER_SHAPE_COLOR = 4
 const F_CLIENT_IMAGE_COLOR = 502
@@ -65,6 +70,8 @@ const PROP_NAME = [2, 15] as const
 const PROP_TRANSFORM = [1, 12] as const
 const SERVER_SHAPE_PROPERTY = [21, 38] as const
 const CLIENT_IMAGE_PROPERTY = [73, 96] as const
+const CLIENT_IMAGE_SETTINGS_PROPERTY = [74, 97] as const
+const CLIENT_PLAIN_CONTAINER_PROPERTY = [68, 91] as const
 
 /** Field numbers this build models on a ResourceEntry / UiObject. */
 const KNOWN_ENTRY_FIELDS = new Set([F_IDENTITY, F_REFERENCE_LIST, F_INTERNAL_NAME, F_RESOURCE_CLASS, F_UI])
@@ -95,6 +102,8 @@ export interface InspectedObject {
   imageId: number | null
   shape: ShapeKind | null
   colorArgb: number | null
+  /** In-game mask toggle; null when the object has no image settings record. */
+  maskEnabled: boolean | null
   childGuids: number[]
   referenceGuids: number[]
   descriptors: string[]
@@ -186,6 +195,9 @@ function inspectRecord(record: pb.PbMessage): InspectedObject {
       ? (pb.numberOf(clientStyle, F_CLIENT_IMAGE_COLOR) ?? null)
       : null
 
+  const clientSettings = findProperty(properties, CLIENT_IMAGE_SETTINGS_PROPERTY)
+  const clientSettingsBody = clientSettings && pb.child(clientSettings, F_PROP_BODY, F_BODY_CLIENT_IMAGE_SETTINGS)
+
   const nameProperty = findProperty(properties, PROP_NAME)
   const uiIdDescriptor = findProperty(descriptors, DESC_UI_ID)
   // child_guids is packed in engine-written files but protobuf.js emits one
@@ -206,6 +218,7 @@ function inspectRecord(record: pb.PbMessage): InspectedObject {
     imageId,
     shape: imageId == null ? null : (shapeKindForImageId(imageId) ?? null),
     colorArgb,
+    maskEnabled: clientSettingsBody ? pb.numberOf(clientSettingsBody, F_IMAGE_MASK_ENABLED) === 1 : null,
     childGuids,
     referenceGuids: pb
       .fields(record, F_REFERENCE_LIST)
@@ -243,7 +256,7 @@ export function inspectGia(bytes: Uint8Array): InspectedGia {
 // validation
 // ---------------------------------------------------------------------------
 
-export const CLIENT_PLACEHOLDER_CONTAINER_NAME = 'Image Container'
+export { CLIENT_TEMPLATE_CONTAINER_NAMES }
 
 /**
  * Checks that a generated bundle really is a usable Client Control Template.
@@ -260,10 +273,32 @@ export function validateClientGia(inspected: InspectedGia): string[] {
   }
   if (!container.guid) problems.push('container has no GUID')
   if (!container.name.trim()) problems.push('container has no name')
-  if (container.name === CLIENT_PLACEHOLDER_CONTAINER_NAME) {
-    problems.push(`container is still named the template placeholder "${CLIENT_PLACEHOLDER_CONTAINER_NAME}"`)
+  if (CLIENT_TEMPLATE_CONTAINER_NAMES.includes(container.name)) {
+    problems.push(`container is still named the template placeholder "${container.name}"`)
   }
   if (container.transforms.length === 0) problems.push('container has no transform entries')
+
+  // The container is an image in its own right: it covers the source image
+  // rectangle so the in-game mask has something to clip to, and is fully
+  // transparent so it never draws over the children.
+  if (!container.properties.includes(`${CLIENT_IMAGE_PROPERTY[0]}/${CLIENT_IMAGE_PROPERTY[1]}`)) {
+    problems.push('container is missing the image style record; it is not an image container')
+  }
+  if (!container.properties.includes(`${CLIENT_IMAGE_SETTINGS_PROPERTY[0]}/${CLIENT_IMAGE_SETTINGS_PROPERTY[1]}`)) {
+    problems.push('container is missing the image settings record')
+  }
+  if (container.properties.includes(`${CLIENT_PLAIN_CONTAINER_PROPERTY[0]}/${CLIENT_PLAIN_CONTAINER_PROPERTY[1]}`)) {
+    problems.push('container still carries the plain-container record')
+  }
+  if (container.imageId !== IMAGE_RESOURCE_IDS.square) {
+    problems.push(`container image resource is ${container.imageId}, expected ${IMAGE_RESOURCE_IDS.square}`)
+  }
+  if ((container.colorArgb ?? 0) >>> 24 !== 0) {
+    problems.push(
+      `container image colour is #${((container.colorArgb ?? 0) >>> 0).toString(16).padStart(8, '0').toUpperCase()}, expected a fully transparent colour such as #${CLIENT_CONTAINER_COLOR_ARGB.toString(16).padStart(8, '0').toUpperCase()}`,
+    )
+  }
+  if (container.maskEnabled) problems.push('container has the in-game mask toggle switched on')
 
   const seen = new Set<number>([container.guid])
   const childGuids = children.map((child) => child.guid)

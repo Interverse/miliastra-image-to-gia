@@ -45,6 +45,23 @@ export const CLIENT_CONTAINER_RESOURCE_CLASS = 70
 export const UI_CONTROL_RESOURCE_CLASS = 15
 
 // ---------------------------------------------------------------------------
+// client image container
+// ---------------------------------------------------------------------------
+
+// The Client container is itself an image covering the source image rectangle.
+// It is never meant to be drawn, so its colour is white with zero alpha; the
+// rectangle is still there for a player who switches the in-game mask on.
+export const CLIENT_CONTAINER_COLOR_ARGB = 0x00ffffff
+
+// Container names that can only have come from a reference file. Generated
+// output must always carry the converted image's own name instead.
+export const CLIENT_TEMPLATE_CONTAINER_NAMES: readonly string[] = [
+  'Image Container',
+  'Image With Mask Off',
+  'Image With Mask',
+]
+
+// ---------------------------------------------------------------------------
 // device scales
 // ---------------------------------------------------------------------------
 

@@ -11,7 +11,19 @@ export function assetBytes(name: string): Uint8Array {
 }
 
 export const serverTemplateBytes = (): Uint8Array => assetBytes('template.gia')
+
+/** The shipped Client template: an image container with the mask toggle off. */
 export const clientTemplateBytes = (): Uint8Array => assetBytes('client-template.gia')
+
+export function fixtureBytes(name: string): Uint8Array {
+  return new Uint8Array(readFileSync(fileURLToPath(new URL(`tests/fixtures/${name}`, root))))
+}
+
+/** The first reference export, whose container was a plain container. */
+export const plainContainerReferenceBytes = (): Uint8Array => fixtureBytes('client-image-container.gia')
+
+/** The same image container as the template, but with the mask toggle on. */
+export const maskOnReferenceBytes = (): Uint8Array => fixtureBytes('client-image-mask-on.gia')
 
 let cachedTypes: GiaTypes | null = null
 

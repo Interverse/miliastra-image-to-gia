@@ -2,10 +2,10 @@
 //
 //   Image Processing -> ImagePlan -> this module
 //
-// Reverse-engineered from the supplied `Client Image.gia`, which contains a
-// container named "Image Container" holding two children, "Square" and
-// "Circle", where Circle sits exactly +100 on X. See docs/client-gia-format.md
-// for the field-by-field findings.
+// Reverse-engineered from the supplied reference exports. The current template
+// is `Image with Mask Off.gia`, whose container is itself an image with the
+// in-game mask toggle off; the earlier plain-container export is kept as a
+// fixture. See docs/client-gia-format.md for the field-by-field findings.
 //
 // Differences from the Server Control Template that this file encodes:
 //
@@ -22,6 +22,9 @@
 //     renders its first child first, so later siblings cover earlier ones.
 //     The children are therefore emitted back to front, the reverse of the
 //     Server hierarchy - see the `compositing` option in imagePlan.ts.
+//   * the container is an image in its own right, carrying the same 73/96 and
+//     74/97 records as its children, sized to the source image rectangle and
+//     coloured fully transparent so it is never drawn.
 //
 // Everything else in the template - including fields whose purpose is still
 // unknown - is carried through byte for byte. Generation works by parsing the
@@ -30,13 +33,16 @@
 // converted image.
 
 import {
+  CLIENT_CONTAINER_COLOR_ARGB,
   CLIENT_CONTAINER_RESOURCE_CLASS,
+  CLIENT_TEMPLATE_CONTAINER_NAMES,
   UI_CONTROL_RESOURCE_CLASS,
   buildExportTag,
   bytesToPayload,
   encodeField501String,
   encodeField501Varint,
   encodeVarint,
+  imageResourceId,
   scaleForTransformEntry,
   withGiaHeader,
 } from './giaCommon'
@@ -44,8 +50,7 @@ import { buildImagePlan, emptyPlannedShape, type ImagePlan, type PlannedShape } 
 import * as pb from './pbraw'
 import type { GeneratorConfig, RectPlan } from './types'
 
-/** Placeholder container name in the supplied reference. Never emitted. */
-export const CLIENT_TEMPLATE_CONTAINER_NAME = 'Image Container'
+export { CLIENT_TEMPLATE_CONTAINER_NAMES }
 
 // --- field numbers ---------------------------------------------------------
 
@@ -78,9 +83,14 @@ const F_ENVELOPE_VALUE = 501
 // UiPropertyBody
 const F_BODY_TRANSFORM = 13
 const F_BODY_IMAGE_STYLE = 84
+const F_BODY_IMAGE_SETTINGS = 85
 // Client image style, body field 84
 const F_IMAGE_COLOR = 502
 const F_IMAGE_RESOURCE_ID = 503
+// Client image settings, body field 85. Field 501 is the in-game mask toggle:
+// 1 means on, absent means off. Everything else in the block is unexplained
+// and is carried through from the reference untouched.
+const F_IMAGE_MASK_ENABLED = 501
 // UiTransformComponent / array / entry / fields
 const F_TRANSFORM_ARRAY = 12
 const F_TRANSFORM_ENTRIES = 501
@@ -104,6 +114,9 @@ const DESC_NEXT_GUID = [4, 4] as const
 const PROP_NAME = [2, 15] as const
 const PROP_TRANSFORM = [1, 12] as const
 const PROP_IMAGE_STYLE = [73, 96] as const
+const PROP_IMAGE_SETTINGS = [74, 97] as const
+/** Component slot the plain-container reference carried instead of an image. */
+const PROP_PLAIN_CONTAINER = [68, 91] as const
 
 /** Records that only exist in Server Control Templates. */
 const SERVER_ONLY_RECORDS: ReadonlyArray<readonly [number, number, string]> = [
@@ -309,6 +322,7 @@ export interface ClientTemplate {
   childrenByName: Map<string, PbMessage>
   containerGuid: number
   containerUiId: number
+  containerName: string
   engineVersion: string
 }
 
@@ -329,6 +343,17 @@ export function parseClientTemplate(templateGiaBytes: Uint8Array): ClientTemplat
   const uiObject = pb.child(primary, F_UI, F_UI_OBJECT)
   if (!uiObject) throw new Error('Client template container has no UI object')
   assertNoServerOnlyRecords(uiObject, 'container')
+
+  // The container has to be an image itself, not the plain container the first
+  // reference export used, or the generated group would have no parent image.
+  const containerProperties = pb.fields(uiObject, F_OBJ_PROPERTIES)
+  requireProperty(containerProperties, PROP_IMAGE_STYLE, 'container image style')
+  requireProperty(containerProperties, PROP_IMAGE_SETTINGS, 'container image settings')
+  if (propertyAt(containerProperties, PROP_PLAIN_CONTAINER[0], PROP_PLAIN_CONTAINER[1])) {
+    throw new Error(
+      `Client template container carries the plain-container record (${PROP_PLAIN_CONTAINER[0]}/${PROP_PLAIN_CONTAINER[1]}); it must be an image container`,
+    )
+  }
 
   const containerGuid = pb.numberOf(identity, F_ASSET_GUID) ?? 0
   if (containerGuid === 0) throw new Error('Could not determine the client container GUID')
@@ -355,6 +380,7 @@ export function parseClientTemplate(templateGiaBytes: Uint8Array): ClientTemplat
     childrenByName,
     containerGuid,
     containerUiId,
+    containerName: pb.stringOf(primary, F_INTERNAL_NAME) ?? '',
     engineVersion: pb.stringOf(bundle, F_BUNDLE_ENGINE_VERSION) ?? '7.1.0',
   }
 }
@@ -384,11 +410,11 @@ function prepareContainer(template: ClientTemplate, plan: ImagePlan): PbMessage 
   for (const property of properties) collectGuidFields(pb.asMessage(property), guidFields)
   for (const field of guidFields) pb.setVarint(field, guid)
 
-  // The generated container must not keep the reference file's placeholder.
+  // The generated container must not keep a reference file's placeholder name.
   const name = plan.container.name
-  if (!name.trim() || name === CLIENT_TEMPLATE_CONTAINER_NAME) {
+  if (!name.trim() || name === template.containerName || CLIENT_TEMPLATE_CONTAINER_NAMES.includes(name)) {
     throw new Error(
-      `Client image container needs a generated name; refusing to export with the placeholder "${CLIENT_TEMPLATE_CONTAINER_NAME}"`,
+      `Client image container needs a generated name; refusing to export with the template placeholder "${name}"`,
     )
   }
   pb.setString(pb.ensureField(record, F_INTERNAL_NAME, pb.WIRE_LENGTH), name)
@@ -431,11 +457,40 @@ function prepareContainer(template: ClientTemplate, plan: ImagePlan): PbMessage 
   }
   pb.replaceFields(uiObject, F_OBJ_CHILD_GUIDS, [pb.bytesField(F_OBJ_CHILD_GUIDS, packed)])
 
+  // The container is an image covering the source image rectangle. Children
+  // are positioned relative to this rect's centre, which is what keeps an
+  // element at the image centre landing on the container's centre.
+  //
+  // The rect is always the source image rectangle, never a content bounding
+  // box, so switching the in-game mask on reproduces what the source shows.
+  // The rect is applied unconditionally; only its placement is skipped when
+  // the caller asked to keep the template's own position.
   if (plan.container.applyTransform) {
     const handles = transformHandles(requireProperty(properties, PROP_TRANSFORM, 'container transform'), 'container')
     for (let i = 0; i < handles.length; i += 1) handles[i].deviceScale = scaleForTransformEntry(plan.deviceScales, i)
     applyTransform(handles, plan.container.x, plan.container.y, plan.container.width, plan.container.height, 0)
   }
+
+  // The parent image uses the rectangle resource from the shared ID table and
+  // is fully transparent, so it never draws over the children it frames.
+  const imageBody = pb.child(
+    requireProperty(properties, PROP_IMAGE_STYLE, 'container image style'),
+    F_PROP_BODY,
+    F_BODY_IMAGE_STYLE,
+  )
+  if (!imageBody) throw new Error('Client template container image style has no value body (503/84)')
+  pb.setVarint(pb.ensureField(imageBody, F_IMAGE_RESOURCE_ID, pb.WIRE_VARINT), imageResourceId('square'))
+  pb.setVarint(pb.ensureField(imageBody, F_IMAGE_COLOR, pb.WIRE_VARINT), CLIENT_CONTAINER_COLOR_ARGB >>> 0)
+
+  // The in-game mask stays off. The reference already leaves the toggle out;
+  // clearing it explicitly means a template that had it on cannot leak it.
+  const settingsBody = pb.child(
+    requireProperty(properties, PROP_IMAGE_SETTINGS, 'container image settings'),
+    F_PROP_BODY,
+    F_BODY_IMAGE_SETTINGS,
+  )
+  if (!settingsBody) throw new Error('Client template container image settings has no value body (503/85)')
+  pb.removeField(settingsBody, F_IMAGE_MASK_ENABLED)
 
   if (guid !== template.containerGuid) assertNoStaleGuid(record, template.containerGuid, 'container')
   return record

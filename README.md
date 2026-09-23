@@ -73,9 +73,14 @@ Image Processing ─► ImagePlan ─┬─► Server .gia serializer   (src/lib
   the Client bundle before the download is offered, and lets the Server/Client
   comparison tests assert on decoded structure rather than raw bytes.
 
-The Client exporter refuses to emit a bundle that still carries the reference
-file's placeholder container name (`Image Container`) or that fails validation,
-rather than producing a malformed `.gia`.
+The Client group's parent is itself an image: it carries the rectangle
+resource covering the source image rect, fully transparent so it is never
+drawn, with the in-game mask toggle off. Child offsets stay relative to that
+rect's centre.
+
+The Client exporter refuses to emit a bundle that still carries a reference
+file's placeholder container name or that fails validation, rather than
+producing a malformed `.gia`.
 
 Field-by-field findings are in `docs/client-gia-format.md`.
 
@@ -95,8 +100,10 @@ npm test
 ```
 
 - `tests/clientReference.test.ts` — regression tests against the supplied
-  Client Control Template reference, including the known `Circle = Square + 100`
-  X-offset anchor.
+  Client Control Template references, including the image-container slots, the
+  mask toggle, and the known `Circle = Square + 100` X-offset anchor.
+- `tests/clientImageParent.test.ts` — the parent image's resource, colour, mask
+  state, source-image rect, and child offset relationship.
 - `tests/serverRegression.test.ts` — proves the Server exporter is
   byte-identical to the implementation from before the Server/Client split.
 - `tests/serverVsClient.test.ts` — the same image through both exporters across
@@ -131,7 +138,9 @@ Placed in `public/`:
 - `gia_with_ui_rotation_v6.proto` — schema used by the Server exporter
 - `template.gia` — Server Control Template structural template
 - `client-template.gia` — Client Control Template structural template, the
-  supplied reference file verbatim; it doubles as the test fixture
+  supplied `Image with Mask Off.gia` verbatim; it doubles as the test fixture.
+  Two earlier exports sit in `tests/fixtures/` as evidence for the plain
+  container it replaced and for the mask toggle.
 
 If you want to swap in a newer schema or template, replace those files and run
 `npm test`. The Server regression tests assert the container GUID both
