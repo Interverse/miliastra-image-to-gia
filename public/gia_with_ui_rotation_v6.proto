@@ -40,7 +40,8 @@ message ResourceEntry {
     CHARACTER_TEMPLATE        = 19; // 角色模板
     INTERFACE_LAYOUT          = 20; // 界面布局
     UI_CONTROL_GROUP          = 21; // 界面控件组（交互控件）
-    UI_EXPORT_CONTAINER      = 61; // observed primary UI group/container in exported .gia UI bundles
+    UI_EXPORT_CONTAINER      = 61; // observed primary UI group/container in exported .gia UI bundles (Server Control Template)
+    UI_CLIENT_EXPORT_CONTAINER = 70; // same role in Client Control Template exports; child controls stay UI_CONTROL = 15
     STATUS_NODE_GRAPH         = 22; // 状态节点图
     CLASS_NODE_GRAPH          = 23; // 职业节点图
     GLOBAL_TIMER              = 24; // 全局计时器
@@ -962,6 +963,19 @@ message UiProperty {
   optional bytes raw_31 = 31;
   optional bytes raw_46 = 46;
 
+  // Client Control Template marker fields. Each client property record carries
+  // one empty marker whose field number tracks its property_id, e.g.
+  //   property_id=63 -> field 73, 67 -> 77, 68 -> 78, 73 -> 83, 74 -> 84.
+  // They are always empty in the reference export. Declared so schema-driven
+  // decoding does not silently drop them; generation preserves them verbatim
+  // through the raw codec in src/lib/pbraw.ts.
+  optional bytes raw_73 = 73;
+  optional bytes raw_74 = 74;
+  optional bytes raw_77 = 77;
+  optional bytes raw_78 = 78;
+  optional bytes raw_83 = 83;
+  optional bytes raw_84 = 84;
+
   int32 property_id = 501;
   int32 property_type = 502;
   UiPropertyBody body = 503;
@@ -1030,14 +1044,55 @@ message UiPropertyBody {
   optional bytes raw_12 = 12;
   UiTransformComponent transform = 13;
   optional bytes raw_14 = 14;
-  UiShapeStyle shape_style = 31;
+  UiShapeStyle shape_style = 31; // Server Control Template, property 21/type 38
   optional bytes raw_46 = 46; // observed empty marker in descriptor/body records
   UiSizeComponent size_component = 47;
+
+  // Client Control Template equivalents of the records above.
+  //   property 73/type 96 -> field 84, the image primitive and its colour
+  //   property 74/type 97 -> field 85, fixed image display settings
+  UiClientImageStyle client_image_style = 84;
+  UiClientImageSettings client_image_settings = 85;
+
+  // Empty markers on the remaining client property records (63/83, 67/90,
+  // 68/91). Declared so they survive a schema-driven decode.
+  optional bytes raw_74 = 74;
+  optional bytes raw_78 = 78;
+  optional bytes raw_79 = 79;
 
   int32 property_id = 501;
   int32 property_type = 502;
   int32 is_value_set = 503;
   UiResourceBinding binding = 504;
+}
+
+// Client Control Template image style, UiPropertyBody field 84.
+//
+// Carries the same image resource IDs as UiShapeStyle.shape_type does on the
+// server side: 100001 = square, 100002 = circle, 100003 = triangle. Only the
+// surrounding record differs between the two templates, never the ID.
+message UiClientImageStyle {
+  uint32 color_argb = 502; // AARRGGBB, e.g. 0xFFFFFFFF white opaque
+  int32 image_resource_id = 503;
+}
+
+// Client Control Template image settings, UiPropertyBody field 85.
+//
+// Byte-identical on Square and Circle in the reference export, so the meaning
+// of the individual fields is still unknown and generation preserves the block
+// unchanged. Observed values:
+//   502=1 504=1 505=1 507=2 508=100 510=1 511={8.0, 8.0} 512=85.0 513=85.0 515=1
+message UiClientImageSettings {
+  int32 unknown_502 = 502;
+  int32 unknown_504 = 504;
+  int32 unknown_505 = 505;
+  int32 unknown_507 = 507;
+  int32 unknown_508 = 508;
+  int32 unknown_510 = 510;
+  UiVec2 unknown_511 = 511;
+  optional float unknown_512 = 512;
+  optional float unknown_513 = 513;
+  int32 unknown_515 = 515;
 }
 
 // Transform/layout component.
@@ -1049,7 +1104,12 @@ message UiTransformComponent {
 
 message UiTransformArray {
   repeated UiTransformEntry entries = 501;
+
+  // Template-dependent. Server exports use 9 on child controls and omit it on
+  // the container; Client exports use 23 on child controls and 25 on the
+  // container. Preserve whatever the template carries.
   int32 unknown_502 = 502;
+
   int32 enabled = 504;
 }
 

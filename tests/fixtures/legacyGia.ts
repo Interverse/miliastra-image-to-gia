@@ -1,32 +1,104 @@
-// Server Control Template `.gia` serializer.
-//
-//   Image Processing -> ImagePlan -> this module
-//
-// The pixel work, object identity and transforms all come from the ImagePlan
-// (see imagePlan.ts); this file only knows how a Server Control Template
-// stores them: UiShapeStyle under property 21 / type 38, container resource
-// class 61, and the property/descriptor set the server editor expects.
-//
-// The Client Control Template equivalent lives in giaClient.ts.
+// Snapshot of `src/lib/gia.ts` as it was before the Server/Client split
+// (commit daa3dad). Kept verbatim so the refactored Server Image exporter can
+// be proven byte-for-byte identical to the implementation it replaced.
+// Do not edit: regenerate with `git show daa3dad:src/lib/gia.ts` if ever needed.
 
 import protobuf from 'protobufjs'
-import {
-  buildExportTag,
-  bytesToPayload,
-  decodeField501Varint,
-  encodeField501String,
-  encodeField501Varint,
-  scaleForTransformEntry,
-  withGiaHeader,
-} from './giaCommon'
-import { buildImagePlan, emptyPlannedShape, type PlannedShape } from './imagePlan'
-import type { DeviceScales, GeneratorConfig, RectPlan } from './types'
+import { rotatedBBoxSize, rotatePoint } from '../../src/lib/utils'
+import type { DeviceScales, GeneratorConfig, RectPlan } from '../../src/lib/types'
+
+const SHAPE_SQUARE = 100001
+const DEVICE_SCALE_KEYS: (keyof DeviceScales)[] = ['desktop', 'mobile', 'controller', 'mobileController']
+
+function scaleForTransformEntry(scales: DeviceScales, index: number): number {
+  const key = DEVICE_SCALE_KEYS[index] ?? 'desktop'
+  const scale = scales[key]
+  return Number.isFinite(scale) && scale > 0 ? scale : 1
+}
 
 export interface GiaTypes {
   root: protobuf.Root
   AssetBundle: protobuf.Type
   ResourceEntry: protobuf.Type
   ResourceLocator: protobuf.Type
+}
+
+function bytesToPayload(bytes: Uint8Array): Uint8Array {
+  if (bytes.length < 24) {
+    throw new Error('Template .gia is too small')
+  }
+  return bytes.slice(20, bytes.length - 4)
+}
+
+function withGiaHeader(payloadParts: Uint8Array[]): Blob {
+  let payloadLength = 0
+  for (const part of payloadParts) payloadLength += part.length
+  const header = new DataView(new ArrayBuffer(20))
+  header.setUint32(0, 20 + payloadLength, false)
+  header.setUint32(4, 1, false)
+  header.setUint32(8, 0x0326, false)
+  header.setUint32(12, 3, false)
+  header.setUint32(16, payloadLength, false)
+  const footer = new DataView(new ArrayBuffer(4))
+  footer.setUint32(0, 0x0679, false)
+  return new Blob([header.buffer, ...(payloadParts as BlobPart[]), footer.buffer], { type: 'application/octet-stream' })
+}
+
+function encodeVarint(value: number): Uint8Array {
+  if (value < 0) throw new Error('negative varint not supported')
+  const out: number[] = []
+  let v = value >>> 0
+  while (true) {
+    const b = v & 0x7f
+    v >>>= 7
+    if (v) out.push(b | 0x80)
+    else {
+      out.push(b)
+      return Uint8Array.from(out)
+    }
+  }
+}
+
+function decodeVarint(buf: Uint8Array, offset = 0): { value: number | null; next: number } {
+  let shift = 0
+  let value = 0
+  let i = offset
+  while (i < buf.length) {
+    const b = buf[i++]
+    value |= (b & 0x7f) << shift
+    if ((b & 0x80) === 0) return { value, next: i }
+    shift += 7
+  }
+  return { value: null, next: i }
+}
+
+function encodeField501Varint(value: number): Uint8Array {
+  const tag = encodeVarint((501 << 3) | 0)
+  const body = encodeVarint(value)
+  const out = new Uint8Array(tag.length + body.length)
+  out.set(tag, 0)
+  out.set(body, tag.length)
+  return out
+}
+
+function encodeField501String(text: string): Uint8Array {
+  const enc = new TextEncoder().encode(text)
+  const tag = encodeVarint((501 << 3) | 2)
+  const len = encodeVarint(enc.length)
+  const out = new Uint8Array(tag.length + len.length + enc.length)
+  out.set(tag, 0)
+  out.set(len, tag.length)
+  out.set(enc, tag.length + len.length)
+  return out
+}
+
+function decodeField501Varint(raw?: Uint8Array | number[] | null): number | null {
+  if (!raw) return null
+  const bytes = raw instanceof Uint8Array ? raw : Uint8Array.from(raw)
+  const tag = decodeVarint(bytes, 0)
+  if (tag.value !== ((501 << 3) | 0)) return null
+  const val = decodeVarint(bytes, tag.next)
+  return val.value
 }
 
 function getGuid(resource: any): number {
@@ -110,15 +182,7 @@ function ensureTransformEntryDefaults(entry: any, index: number) {
   if (!f.rotation) f.rotation = {}
 }
 
-function setChildTransform(
-  child: any,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  rotationDegrees = 0,
-  deviceScales: DeviceScales,
-) {
+function setChildTransform(child: any, x: number, y: number, width: number, height: number, rotationDegrees = 0, deviceScales: DeviceScales) {
   const prop = findTransformProperty(child.ui.object)
   const arr = prop.body.transform.transform_array
   if (!arr.entries || arr.entries.length === 0) {
@@ -144,24 +208,17 @@ function setChildTransform(
   })
 }
 
-function applyShape(child: any, shape: PlannedShape, deviceScales: DeviceScales) {
+function setSquareValues(child: any, label: string, x: number, y: number, width: number, height: number, colorArgb: number, rotationDegrees = 0, deviceScales: DeviceScales) {
   const shapeProp = findShapeProperty(child.ui.object)
   if (!shapeProp.body) shapeProp.body = {}
   if (!shapeProp.body.shape_style) shapeProp.body.shape_style = {}
-  shapeProp.body.shape_style.shape_type = shape.imageId
-  shapeProp.body.shape_style.color_argb = shape.colorArgb >>> 0
-  setChildTransform(child, shape.x, shape.y, shape.width, shape.height, shape.rotationDegrees, deviceScales)
-  setUniqueUiIdentityAndName(child, getHiddenUiId(child) ?? 0, shape.label)
+  shapeProp.body.shape_style.shape_type = SHAPE_SQUARE
+  shapeProp.body.shape_style.color_argb = colorArgb >>> 0
+  setChildTransform(child, x, y, width, height, rotationDegrees, deviceScales)
+  setUniqueUiIdentityAndName(child, getHiddenUiId(child) ?? 0, label)
 }
 
-function setParentTransform(
-  parent: any,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  deviceScales: DeviceScales,
-) {
+function setParentTransform(parent: any, x: number, y: number, width: number, height: number, deviceScales: DeviceScales) {
   try {
     const prop = findTransformProperty(parent.ui.object)
     const arr = prop.body.transform.transform_array
@@ -244,33 +301,6 @@ function patchParentDescriptorNextId(parent: any, nextChildGuid: number) {
 // with hundreds of thousands of rectangles.
 const ENCODE_BATCH_SIZE = 1000
 
-/**
- * Reads the container identity out of the bundled server template. Exposed so
- * the plan a Server Image is built from can be reproduced in tests.
- */
-export function readServerTemplateIdentity(
-  templateGiaBytes: Uint8Array,
-  types: GiaTypes,
-): { rootGuid: number; rootUiId: number } {
-  const bundle = decodeBundle(templateGiaBytes, types)
-  const parent = bundle.primary_resource
-  if (!parent?.ui?.object) throw new Error('Template parent UI object not found')
-  const rootGuid = getGuid(parent)
-  if (!rootGuid) throw new Error('Could not determine parent GUID')
-  return { rootGuid, rootUiId: getHiddenUiId(parent) ?? 0 }
-}
-
-function decodeBundle(templateGiaBytes: Uint8Array, types: GiaTypes): any {
-  const payload = bytesToPayload(templateGiaBytes)
-  const bundleMessage = types.AssetBundle.decode(payload)
-  return types.AssetBundle.toObject(bundleMessage, {
-    longs: Number,
-    enums: Number,
-    bytes: Uint8Array,
-    defaults: true,
-  })
-}
-
 export async function buildGiaFromRects(
   templateGiaBytes: Uint8Array,
   rects: RectPlan[],
@@ -281,45 +311,50 @@ export async function buildGiaFromRects(
   outputName = 'output.gia',
   onProgress?: (encoded: number, total: number) => void,
 ): Promise<Blob> {
-  const bundle = decodeBundle(templateGiaBytes, types)
+  const payload = bytesToPayload(templateGiaBytes)
+  const bundleMessage = types.AssetBundle.decode(payload)
+  const bundle = types.AssetBundle.toObject(bundleMessage, {
+    longs: Number,
+    enums: Number,
+    bytes: Uint8Array,
+    defaults: true,
+  }) as any
 
   const parent = bundle.primary_resource
   if (!parent?.ui?.object) throw new Error('Template parent UI object not found')
   const parentGuid = getGuid(parent)
   if (!parentGuid) throw new Error('Could not determine parent GUID')
 
+  setParentName(parent, config.parentName)
+
   const templates: any[] = bundle.dependencies ?? []
   if (templates.length === 0) throw new Error('Template has no child dependencies')
 
-  // Both exporters lay out identity the same way: the container GUID/UI id
-  // from the template, then one per rectangle. Keeping the server template's
-  // own values here is what makes existing exports unchanged.
-  //
-  // A Server Control Template draws its first child last, so the hierarchy
-  // runs front to back and the optimizer's output is emitted as it comes.
-  const plan = buildImagePlan(rects, imgWidth, imgHeight, config, {
-    rootGuid: parentGuid,
-    rootUiId: getHiddenUiId(parent) ?? 0,
-    compositing: 'first-on-top',
-  })
-
-  setParentName(parent, plan.container.name)
+  let maxGuid = parentGuid
+  let maxUiId = 0
+  for (const template of templates.slice(0, rects.length)) {
+    maxGuid = Math.max(maxGuid, getGuid(template))
+    maxUiId = Math.max(maxUiId, getHiddenUiId(template) ?? 0)
+  }
+  const firstCloneUiId = maxUiId + 1
 
   const guids = new Array<number>(rects.length)
-  for (let idx = 0; idx < rects.length; idx += 1) guids[idx] = plan.guidAt(idx)
+  for (let idx = 0; idx < rects.length; idx += 1) {
+    if (idx < templates.length) guids[idx] = getGuid(templates[idx])
+    else {
+      maxGuid += 1
+      guids[idx] = maxGuid
+    }
+  }
 
   rebuildParentRefs(parent, templates, guids)
-  patchParentDescriptorNextId(parent, plan.nextFreeGuid())
+  let nextChildGuid = parentGuid + 1
+  for (const guid of guids) nextChildGuid = Math.max(nextChildGuid, guid + 1)
+  patchParentDescriptorNextId(parent, nextChildGuid)
 
-  if (plan.container.applyTransform) {
-    setParentTransform(
-      parent,
-      plan.container.x,
-      plan.container.y,
-      plan.container.width,
-      plan.container.height,
-      plan.deviceScales,
-    )
+  if (!config.keepParentPosition) {
+    const bbox = rotatedBBoxSize(imgWidth * config.pixelSize, imgHeight * config.pixelSize, config.imageRotation)
+    setParentTransform(parent, config.parentX, config.parentY, bbox.width * config.fieldScale, bbox.height * config.fieldScale, config.deviceScales)
   }
 
   const verifiedParent = types.ResourceEntry.verify(parent)
@@ -336,14 +371,32 @@ export async function buildGiaFromRects(
   types.ResourceEntry.encode(types.ResourceEntry.fromObject(parent), writer.uint32((1 << 3) | 2).fork()).ldelim()
   flush()
 
-  const shape = emptyPlannedShape()
   for (let idx = 0; idx < rects.length; idx += 1) {
-    plan.shapeAt(idx, shape)
+    const rect = rects[idx]
     const dep =
-      idx < templates.length ? templates[idx] : cloneChild(templateForIndex(templates, idx), shape.guid, parentGuid)
+      idx < templates.length
+        ? templates[idx]
+        : cloneChild(templateForIndex(templates, idx), guids[idx], parentGuid)
 
-    if (idx >= templates.length) setUniqueUiIdentityAndName(dep, shape.uiId, shape.label)
-    applyShape(dep, shape, plan.deviceScales)
+    const visibleWidth = rect.w * config.pixelSize
+    const visibleHeight = rect.h * config.pixelSize
+    const width = visibleWidth * config.fieldScale
+    const height = visibleHeight * config.fieldScale
+
+    const visibleCenterX = (rect.x + rect.w / 2 - imgWidth / 2) * config.pixelSize
+    const visibleCenterY = config.yDown
+      ? (rect.y + rect.h / 2 - imgHeight / 2) * config.pixelSize
+      : (imgHeight / 2 - (rect.y + rect.h / 2)) * config.pixelSize
+
+    const rotated = rotatePoint(visibleCenterX, visibleCenterY, config.imageRotation)
+    const centerX = rotated.x * config.fieldScale
+    const centerY = rotated.y * config.fieldScale
+
+    const label = `Rect ${idx + 1}`
+    if (idx >= templates.length) {
+      setUniqueUiIdentityAndName(dep, firstCloneUiId + (idx - templates.length), label)
+    }
+    setSquareValues(dep, label, centerX, centerY, width, height, rect.color, config.imageRotation, config.deviceScales)
 
     const verified = types.ResourceEntry.verify(dep)
     if (verified) throw new Error(`Bundle verify failed: ${verified}`)
@@ -358,7 +411,7 @@ export async function buildGiaFromRects(
   }
 
   // AssetBundle.export_tag = 3, AssetBundle.engine_version = 5
-  writer.uint32((3 << 3) | 2).string(buildExportTag(parentGuid, outputName))
+  writer.uint32((3 << 3) | 2).string(`600489258-0-${parentGuid}-\\${outputName}`)
   writer.uint32((5 << 3) | 2).string(bundle.engine_version || '6.6.0')
   flush()
 

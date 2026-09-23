@@ -415,6 +415,128 @@ select option {
   outline-offset: 2px;
 }
 
+/* ----- export targets -----
+   Server and Client produce different .gia structures from the same picture,
+   so the two downloads are kept visually far apart: different accent colour,
+   different border, and a badge on each card. */
+.export-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.export-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--export-line);
+  border-top: 3px solid var(--export-accent);
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, var(--export-tint), transparent 70%),
+    var(--panel);
+}
+
+.export-card-server {
+  --export-accent: var(--accent);
+  --export-accent-hover: var(--accent-hover);
+  --export-line: rgba(45, 108, 223, 0.45);
+  --export-tint: rgba(45, 108, 223, 0.12);
+}
+
+.export-card-client {
+  --export-accent: #a259d9;
+  --export-accent-hover: #b571e6;
+  --export-line: rgba(162, 89, 217, 0.45);
+  --export-tint: rgba(162, 89, 217, 0.12);
+}
+
+.export-card.is-pending {
+  --export-line: var(--line);
+  --export-tint: transparent;
+}
+
+.export-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.export-card-head strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+.export-badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #fff;
+  background: var(--export-accent);
+}
+
+.export-card.is-pending .export-badge {
+  background: var(--line-strong);
+  color: var(--muted);
+}
+
+.export-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.export-btn {
+  width: 100%;
+  margin-top: auto;
+  border: none;
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: #fff;
+  background: var(--export-accent);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.12s;
+}
+
+.export-btn:hover:not(:disabled) {
+  background: var(--export-accent-hover);
+  transform: translateY(-1px);
+}
+
+.export-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.export-btn:disabled {
+  background: var(--line);
+  color: var(--faint);
+  cursor: not-allowed;
+  transform: none;
+}
+
+.export-btn:focus-visible {
+  outline: 2px solid var(--sky);
+  outline-offset: 2px;
+}
+
+.export-file {
+  margin: 0;
+  font-size: 11px;
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
 /* ----- status panel ----- */
 .status-panel {
   display: grid;
@@ -702,7 +824,8 @@ select option {
 
   .control-grid,
   .advanced-grid,
-  .scale-config-row {
+  .scale-config-row,
+  .export-grid {
     grid-template-columns: 1fr;
   }
 

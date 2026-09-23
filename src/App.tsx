@@ -3,6 +3,7 @@ import type {
   DeviceScaleKey,
   GeneratorConfig,
   GenerationStats,
+  GiaTarget,
   Optimization,
   JsonExportMode,
 } from "./lib/types";
@@ -18,7 +19,7 @@ import {
   type Lang,
   type MessageKey,
 } from "./lib/i18n";
-import type { WorkerRequest, WorkerResponse } from "./workers/generator.worker";
+import type { GiaResult, WorkerRequest, WorkerResponse } from "./workers/generator.worker";
 
 const DEFAULT_CONFIG: GeneratorConfig = {
   optimization: "safe-overdraw",
@@ -65,7 +66,35 @@ const WORKER_PROGRESS_KEYS: Record<string, MessageKey> = {
   "Optimizing rectangles": "statusOptimizing",
   "Image elements to encode": "statusElementCount",
   "Encoding image elements": "statusEncodingProgress",
+  "Encoding server image elements": "statusEncodingServer",
+  "Encoding client image elements": "statusEncodingClient",
+  "Validating client structure": "statusValidatingClient",
 };
+
+// The two export targets, rendered as two deliberately distinct cards so a
+// Server Image can never be mistaken for a Client Image.
+const EXPORT_TARGETS: Array<{
+  target: GiaTarget;
+  badgeKey: MessageKey;
+  titleKey: MessageKey;
+  hintKey: MessageKey;
+  buttonKey: MessageKey;
+}> = [
+  {
+    target: "server",
+    badgeKey: "badgeServer",
+    titleKey: "exportServerTitle",
+    hintKey: "exportServerHint",
+    buttonKey: "btnDownloadServer",
+  },
+  {
+    target: "client",
+    badgeKey: "badgeClient",
+    titleKey: "exportClientTitle",
+    hintKey: "exportClientHint",
+    buttonKey: "btnDownloadClient",
+  },
+];
 
 // Status is stored as a key + params (or a raw string) so it re-renders in
 // the right language when the user switches mid-run.
@@ -120,8 +149,7 @@ export default function App() {
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [status, setStatus] = useState<StatusMessage>({ key: "statusChoosePng" });
   const [busy, setBusy] = useState(false);
-  const [downloadBlob, setDownloadBlob] = useState<Blob | null>(null);
-  const [downloadName, setDownloadName] = useState<string>("output.gia");
+  const [downloads, setDownloads] = useState<Partial<Record<GiaTarget, GiaResult>>>({});
   const [stats, setStats] = useState<GenerationStats | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [jsonMode, setJsonMode] = useState<JsonExportMode>("raw");
@@ -164,10 +192,15 @@ export default function App() {
         const key = WORKER_PROGRESS_KEYS[msg.message];
         setStatus(key ? { key, params: msg.params } : { raw: msg.message });
       } else if (msg.type === "gia-done") {
-        setDownloadBlob(msg.giaBlob);
-        setDownloadName(msg.downloadName);
+        const next: Partial<Record<GiaTarget, GiaResult>> = {};
+        for (const result of msg.results) next[result.target] = result;
+        setDownloads(next);
         setStats(msg.stats);
-        setStatus({ key: "statusDone", params: { count: msg.stats.shapeCount } });
+        setStatus(
+          msg.partialError
+            ? { key: "statusClientFailed", params: { message: msg.partialError } }
+            : { key: "statusDoneBoth", params: { count: msg.stats.shapeCount } }
+        );
         setBusy(false);
       } else if (msg.type === "json-done") {
         const blob = new Blob([msg.json], { type: "application/json" });
@@ -200,7 +233,6 @@ export default function App() {
   }, [file]);
 
   const canGenerate = !!file && !busy;
-  const canDownload = !!downloadBlob && !busy;
 
   const statusText = "raw" in status ? status.raw : t(status.key, status.params);
 
@@ -243,7 +275,7 @@ export default function App() {
     if (!file || !workerRef.current) return;
     setBusy(true);
     setStats(null);
-    setDownloadBlob(null);
+    setDownloads({});
     setStatus({ key: "statusReadingPng" });
 
     try {
@@ -286,7 +318,7 @@ export default function App() {
 
   function handleImageChange(nextFile: File | null) {
     setFile(nextFile);
-    setDownloadBlob(null);
+    setDownloads({});
     setStats(null);
     setLastJson(null);
 
@@ -303,9 +335,10 @@ export default function App() {
     }
   }
 
-  function handleDownload() {
-    if (!downloadBlob) return;
-    downloadFile(downloadBlob, downloadName);
+  function handleDownload(target: GiaTarget) {
+    const result = downloads[target];
+    if (!result) return;
+    downloadFile(result.blob, result.downloadName);
   }
 
   async function handleJsonExport() {
@@ -680,13 +713,38 @@ export default function App() {
             >
               {busy ? t("btnGenerating") : t("btnGenerate")}
             </button>
-            <button
-              className={`secondary-btn ${canDownload ? "" : "disabled"}`}
-              disabled={!canDownload}
-              onClick={handleDownload}
-            >
-              {t("btnDownload")}
-            </button>
+          </div>
+
+          <h2 className="section-title">{t("sectionExport")}</h2>
+          <div className="export-grid">
+            {EXPORT_TARGETS.map(({ target, badgeKey, titleKey, hintKey, buttonKey }) => {
+              const result = downloads[target];
+              const ready = !!result && !busy;
+              return (
+                <div
+                  className={`export-card export-card-${target} ${ready ? "" : "is-pending"}`}
+                  key={target}
+                >
+                  <div className="export-card-head">
+                    <span className={`export-badge export-badge-${target}`}>
+                      {t(badgeKey)}
+                    </span>
+                    <strong>{t(titleKey)}</strong>
+                  </div>
+                  <p className="export-hint">{t(hintKey)}</p>
+                  <button
+                    className={`export-btn export-btn-${target}`}
+                    disabled={!ready}
+                    onClick={() => handleDownload(target)}
+                  >
+                    {t(buttonKey)}
+                  </button>
+                  <p className="export-file">
+                    {result ? result.downloadName : t("exportNotReady")}
+                  </p>
+                </div>
+              );
+            })}
           </div>
 
           <div className="status-panel">
